@@ -11,7 +11,6 @@
  - do:
       create:
           index:   test_1
-          type:    test
           id:      1
           body:    { foo: bar }
 
@@ -27,7 +26,6 @@
  - do:
       create:
           index:   test_1
-          type:    test
           id:      2
           refresh: true
           body:    { foo: bar }
@@ -44,10 +42,10 @@
 
 ---
 "When refresh url parameter is an empty string that means \"refresh immediately\"":
+
  - do:
       create:
           index:   test_1
-          type:    test
           id:      1
           refresh: ""
           body:    { foo: bar }
@@ -64,10 +62,10 @@
 
 ---
 "refresh=wait_for waits until changes are visible in search":
+
  - do:
       index:
           index:   create_60_refresh_1
-          type:    test
           id:      create_60_refresh_id1
           body:    { foo: bar }
           refresh: wait_for

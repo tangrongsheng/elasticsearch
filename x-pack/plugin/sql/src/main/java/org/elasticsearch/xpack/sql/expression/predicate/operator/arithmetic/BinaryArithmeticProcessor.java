@@ -17,7 +17,9 @@ import org.elasticsearch.xpack.sql.expression.predicate.PredicateBiFunction;
 import org.elasticsearch.xpack.sql.expression.predicate.operator.arithmetic.BinaryArithmeticProcessor.BinaryArithmeticOperation;
 
 import java.io.IOException;
+import java.time.OffsetTime;
 import java.time.ZonedDateTime;
+import java.time.temporal.Temporal;
 import java.util.function.BiFunction;
 
 public class BinaryArithmeticProcessor extends FunctionalBinaryProcessor<Object, Object, Object, BinaryArithmeticOperation> {
@@ -41,17 +43,17 @@ public class BinaryArithmeticProcessor extends FunctionalBinaryProcessor<Object,
             }
             l = unwrapJodaTime(l);
             r = unwrapJodaTime(r);
-            if (l instanceof ZonedDateTime && r instanceof IntervalYearMonth) {
-                return Arithmetics.add((ZonedDateTime) l, ((IntervalYearMonth) r).interval());
+            if ((l instanceof ZonedDateTime || l instanceof OffsetTime) && r instanceof IntervalYearMonth) {
+                return Arithmetics.add((Temporal) l, ((IntervalYearMonth) r).interval());
             }
-            if (l instanceof ZonedDateTime && r instanceof IntervalDayTime) {
-                return Arithmetics.add((ZonedDateTime) l, ((IntervalDayTime) r).interval());
+            if ((l instanceof ZonedDateTime || l instanceof OffsetTime) && r instanceof IntervalDayTime) {
+                return Arithmetics.add((Temporal) l, ((IntervalDayTime) r).interval());
             }
-            if (r instanceof ZonedDateTime && l instanceof IntervalYearMonth) {
-                return Arithmetics.add((ZonedDateTime) r, ((IntervalYearMonth) l).interval());
+            if ((r instanceof ZonedDateTime || r instanceof OffsetTime) && l instanceof IntervalYearMonth) {
+                return Arithmetics.add((Temporal) r, ((IntervalYearMonth) l).interval());
             }
-            if (r instanceof ZonedDateTime && l instanceof IntervalDayTime) {
-                return Arithmetics.add((ZonedDateTime) r, ((IntervalDayTime) l).interval());
+            if ((r instanceof ZonedDateTime || r instanceof OffsetTime) && l instanceof IntervalDayTime) {
+                return Arithmetics.add((Temporal) r, ((IntervalDayTime) l).interval());
             }
 
             throw new SqlIllegalArgumentException("Cannot compute [+] between [{}] [{}]", l.getClass().getSimpleName(),
@@ -69,20 +71,41 @@ public class BinaryArithmeticProcessor extends FunctionalBinaryProcessor<Object,
             }
             l = unwrapJodaTime(l);
             r = unwrapJodaTime(r);
-            if (l instanceof ZonedDateTime && r instanceof IntervalYearMonth) {
-                return Arithmetics.sub((ZonedDateTime) l, ((IntervalYearMonth) r).interval());
+            if ((l instanceof ZonedDateTime || l instanceof OffsetTime) && r instanceof IntervalYearMonth) {
+                return Arithmetics.sub((Temporal) l, ((IntervalYearMonth) r).interval());
             }
-            if (l instanceof ZonedDateTime && r instanceof IntervalDayTime) {
-                return Arithmetics.sub((ZonedDateTime) l, ((IntervalDayTime) r).interval());
+            if ((l instanceof ZonedDateTime || l instanceof OffsetTime) && r instanceof IntervalDayTime) {
+                return Arithmetics.sub((Temporal) l, ((IntervalDayTime) r).interval());
             }
-            if (r instanceof ZonedDateTime && l instanceof Interval<?>) {
-                throw new SqlIllegalArgumentException("Cannot substract a date from an interval; do you mean the reverse?");
+            if ((r instanceof ZonedDateTime  || r instanceof OffsetTime) && l instanceof Interval<?>) {
+                throw new SqlIllegalArgumentException("Cannot subtract a date from an interval; do you mean the reverse?");
             }
 
             throw new SqlIllegalArgumentException("Cannot compute [-] between [{}] [{}]", l.getClass().getSimpleName(),
                     r.getClass().getSimpleName());
         }, "-"),
-        MUL(Arithmetics::mul, "*"),
+        MUL((Object l, Object r) -> {
+            if (l instanceof Number && r instanceof Number) {
+                return Arithmetics.mul((Number) l, (Number) r);
+            }
+            l = unwrapJodaTime(l);
+            r = unwrapJodaTime(r);
+            if (l instanceof Number && r instanceof IntervalYearMonth) {
+                return ((IntervalYearMonth) r).mul(((Number) l).intValue());
+            }
+            if (r instanceof Number && l instanceof IntervalYearMonth) {
+                return ((IntervalYearMonth) l).mul(((Number) r).intValue());
+            }
+            if (l instanceof Number && r instanceof IntervalDayTime) {
+                return ((IntervalDayTime) r).mul(((Number) l).longValue());
+            }
+            if (r instanceof Number && l instanceof IntervalDayTime) {
+                return ((IntervalDayTime) l).mul(((Number) r).longValue());
+            }
+
+            throw new SqlIllegalArgumentException("Cannot compute [*] between [{}] [{}]", l.getClass().getSimpleName(),
+                    r.getClass().getSimpleName());
+        }, "*"),
         DIV(Arithmetics::div, "/"),
         MOD(Arithmetics::mod, "%");
 
@@ -141,7 +164,7 @@ public class BinaryArithmeticProcessor extends FunctionalBinaryProcessor<Object,
             return null;
         }
 
-        if (f == BinaryArithmeticOperation.MUL || f == BinaryArithmeticOperation.DIV || f == BinaryArithmeticOperation.MOD) {
+        if (f == BinaryArithmeticOperation.DIV || f == BinaryArithmeticOperation.MOD) {
             if (!(left instanceof Number)) {
                 throw new SqlIllegalArgumentException("A number is required; received {}", left);
             }
@@ -153,8 +176,8 @@ public class BinaryArithmeticProcessor extends FunctionalBinaryProcessor<Object,
             return f.apply(left, right);
         }
 
-        if (f == BinaryArithmeticOperation.ADD || f == BinaryArithmeticOperation.SUB) {
-                return f.apply(left, right);
+        if (f == BinaryArithmeticOperation.ADD || f == BinaryArithmeticOperation.SUB || f == BinaryArithmeticOperation.MUL) {
+            return f.apply(left, right);
         }
 
         // this should not occur

@@ -66,7 +66,7 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
         }, Property.Dynamic, Property.NodeScope);
 
     public static final Setting<ByteSizeValue> FIELDDATA_CIRCUIT_BREAKER_LIMIT_SETTING =
-        Setting.memorySizeSetting("indices.breaker.fielddata.limit", "60%", Property.Dynamic, Property.NodeScope);
+        Setting.memorySizeSetting("indices.breaker.fielddata.limit", "40%", Property.Dynamic, Property.NodeScope);
     public static final Setting<Double> FIELDDATA_CIRCUIT_BREAKER_OVERHEAD_SETTING =
         Setting.doubleSetting("indices.breaker.fielddata.overhead", 1.03d, 0.0d, Property.Dynamic, Property.NodeScope);
     public static final Setting<CircuitBreaker.Type> FIELDDATA_CIRCUIT_BREAKER_TYPE_SETTING =
@@ -104,7 +104,7 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
     private final AtomicLong parentTripCount = new AtomicLong(0);
 
     public HierarchyCircuitBreakerService(Settings settings, ClusterSettings clusterSettings) {
-        super(settings);
+        super();
         this.fielddataSettings = new BreakerSettings(CircuitBreaker.FIELDDATA,
                 FIELDDATA_CIRCUIT_BREAKER_LIMIT_SETTING.get(settings).getBytes(),
                 FIELDDATA_CIRCUIT_BREAKER_OVERHEAD_SETTING.get(settings),
@@ -325,21 +325,21 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
                 message.append("/");
                 message.append(new ByteSizeValue(newBytesReserved));
                 message.append("]");
-            } else {
-                message.append(", usages [");
-                message.append(String.join(", ",
-                    this.breakers.entrySet().stream().map(e -> {
-                        final CircuitBreaker breaker = e.getValue();
-                        final long breakerUsed = (long)(breaker.getUsed() * breaker.getOverhead());
-                        return e.getKey() + "=" + breakerUsed + "/" + new ByteSizeValue(breakerUsed);
-                    })
-                        .collect(Collectors.toList())));
-                message.append("]");
             }
+            message.append(", usages [");
+            message.append(String.join(", ",
+                this.breakers.entrySet().stream().map(e -> {
+                    final CircuitBreaker breaker = e.getValue();
+                    final long breakerUsed = (long)(breaker.getUsed() * breaker.getOverhead());
+                    return e.getKey() + "=" + breakerUsed + "/" + new ByteSizeValue(breakerUsed);
+                })
+                    .collect(Collectors.toList())));
+            message.append("]");
             // derive durability of a tripped parent breaker depending on whether the majority of memory tracked by
             // child circuit breakers is categorized as transient or permanent.
             CircuitBreaker.Durability durability = memoryUsed.transientChildUsage >= memoryUsed.permanentChildUsage ?
                 CircuitBreaker.Durability.TRANSIENT : CircuitBreaker.Durability.PERMANENT;
+            logger.debug("{}", message);
             throw new CircuitBreakingException(message.toString(), memoryUsed.totalUsage, parentLimit, durability);
         }
     }

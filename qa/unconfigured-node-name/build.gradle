@@ -1,3 +1,5 @@
+import org.elasticsearch.gradle.OS
+
 /*
  * Licensed to Elasticsearch under one or more contributor
  * license agreements. See the NOTICE file distributed with
@@ -17,16 +19,15 @@
  * under the License.
  */
 
+apply plugin: 'elasticsearch.testclusters'
 apply plugin: 'elasticsearch.standalone-rest-test'
 apply plugin: 'elasticsearch.rest-test'
 
-integTestCluster {
-  setting 'node.name', null
-  // TODO: Run this using zen2
-  setting 'discovery.type', 'zen'
+testClusters.integTest {
+  nameCustomization = { null }
 }
 
-integTestRunner {
-  systemProperty 'tests.logfile',
-    "${ -> integTest.nodes[0].homeDir}/logs/${ -> integTest.nodes[0].clusterName }.log"
+integTest.runner {
+  nonInputProperties.systemProperty 'tests.logfile',
+    "${ -> testClusters.integTest.singleNode().getServerLog() }"
 }

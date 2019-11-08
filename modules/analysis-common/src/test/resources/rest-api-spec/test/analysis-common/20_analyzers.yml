@@ -68,17 +68,6 @@
     - match:  { tokens.0.token: a1 b2 c3 d4 }
 
 ---
-"standard_html_strip":
-    - do:
-        indices.analyze:
-          body:
-            text:     <bold/> <italic/>
-            analyzer: standard_html_strip
-    - length: { tokens: 2 }
-    - match:  { tokens.0.token: bold }
-    - match:  { tokens.1.token: italic }
-
----
 "pattern":
     - do:
         indices.analyze:

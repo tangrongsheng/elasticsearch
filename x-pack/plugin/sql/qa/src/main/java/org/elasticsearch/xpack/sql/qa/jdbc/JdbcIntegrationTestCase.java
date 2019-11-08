@@ -27,9 +27,11 @@ import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 
+import static org.elasticsearch.xpack.sql.qa.jdbc.JdbcTestUtils.JDBC_TIMEZONE;
 import static org.elasticsearch.xpack.sql.qa.rest.RestSqlTestCase.assertNoSearchContexts;
 
 public abstract class JdbcIntegrationTestCase extends ESRestTestCase {
+    
     @After
     public void checkSearchContent() throws Exception {
         // Some context might linger due to fire and forget nature of scroll cleanup
@@ -49,9 +51,33 @@ public abstract class JdbcIntegrationTestCase extends ESRestTestCase {
     }
 
     public Connection esJdbc() throws SQLException {
-        return randomBoolean() ? useDriverManager() : useDataSource();
+        return esJdbc(connectionProperties());
     }
 
+    public Connection esJdbc(Properties props) throws SQLException {
+        return createConnection(props);
+    }
+
+    protected Connection createConnection(Properties connectionProperties) throws SQLException {
+        String elasticsearchAddress = getProtocol() + "://" + elasticsearchAddress();
+        String address = "jdbc:es://" + elasticsearchAddress;
+        Connection connection = null;
+        if (randomBoolean()) {
+            connection = DriverManager.getConnection(address, connectionProperties);
+        } else {
+            EsDataSource dataSource = new EsDataSource();
+            dataSource.setUrl(address);
+            dataSource.setProperties(connectionProperties);
+            connection = dataSource.getConnection();
+        }
+
+        assertNotNull("The timezone should be specified", connectionProperties.getProperty("timezone"));
+        return connection;
+    }
+
+    //
+    // methods below are used inside the documentation only
+    //
     protected Connection useDriverManager() throws SQLException {
         String elasticsearchAddress = getProtocol() + "://" + elasticsearchAddress();
         // tag::connect-dm
@@ -83,12 +109,18 @@ public abstract class JdbcIntegrationTestCase extends ESRestTestCase {
     }
 
     public static void index(String index, String documentId, CheckedConsumer<XContentBuilder, IOException> body) throws IOException {
-        Request request = new Request("PUT", "/" + index + "/doc/" + documentId);
+        Request request = new Request("PUT", "/" + index + "/_doc/" + documentId);
         request.addParameter("refresh", "true");
         XContentBuilder builder = JsonXContent.contentBuilder().startObject();
         body.accept(builder);
         builder.endObject();
         request.setJsonEntity(Strings.toString(builder));
+        client().performRequest(request);
+    }
+
+    public static void delete(String index, String documentId) throws IOException {
+        Request request = new Request("DELETE", "/" + index + "/_doc/" + documentId);
+        request.addParameter("refresh", "true");
         client().performRequest(request);
     }
 
@@ -106,7 +138,9 @@ public abstract class JdbcIntegrationTestCase extends ESRestTestCase {
      */
     protected Properties connectionProperties() {
         Properties connectionProperties = new Properties();
-        connectionProperties.put("timezone", randomKnownTimeZone());
+        connectionProperties.put(JDBC_TIMEZONE, randomKnownTimeZone());
+        // in the tests, don't be lenient towards multi values
+        connectionProperties.put("field.multi.value.leniency", "false");
         return connectionProperties;
     }
 

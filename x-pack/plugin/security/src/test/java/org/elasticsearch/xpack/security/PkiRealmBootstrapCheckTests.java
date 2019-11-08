@@ -6,16 +6,17 @@
 package org.elasticsearch.xpack.security;
 
 import org.elasticsearch.bootstrap.BootstrapCheck;
-import org.elasticsearch.bootstrap.BootstrapContext;
 import org.elasticsearch.common.settings.MockSecureSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.TestEnvironment;
-import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.test.AbstractBootstrapCheckTestCase;
 import org.elasticsearch.xpack.core.ssl.SSLService;
 import org.hamcrest.Matchers;
 
-public class PkiRealmBootstrapCheckTests extends ESTestCase {
+import java.nio.file.Path;
+
+public class PkiRealmBootstrapCheckTests extends AbstractBootstrapCheckTestCase {
 
     public void testPkiRealmBootstrapDefault() throws Exception {
         final Settings settings = Settings.EMPTY;
@@ -24,29 +25,34 @@ public class PkiRealmBootstrapCheckTests extends ESTestCase {
     }
 
     public void testBootstrapCheckWithPkiRealm() throws Exception {
+        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/testnode.crt");
+        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/testnode.pem");
+
+        MockSecureSettings secureSettings = new MockSecureSettings();
         Settings settings = Settings.builder()
                 .put("xpack.security.authc.realms.pki.test_pki.order", 0)
                 .put("path.home", createTempDir())
+                .setSecureSettings(secureSettings)
                 .build();
         Environment env = TestEnvironment.newEnvironment(settings);
         assertTrue(runCheck(settings, env).isFailure());
 
         // enable transport tls
+        secureSettings.setString("xpack.security.transport.ssl.secure_key_passphrase", "testnode");
         settings = Settings.builder().put(settings)
                 .put("xpack.security.transport.ssl.enabled", true)
+                .put("xpack.security.transport.ssl.certificate", certPath)
+                .put("xpack.security.transport.ssl.key", keyPath)
                 .build();
         assertFalse(runCheck(settings, env).isFailure());
 
-        // disable client auth default
-        settings = Settings.builder().put(settings)
-                .put("xpack.ssl.client_authentication", "none")
-                .build();
-        env = TestEnvironment.newEnvironment(settings);
-        assertTrue(runCheck(settings, env).isFailure());
-
         // enable ssl for http
+        secureSettings.setString("xpack.security.http.ssl.secure_key_passphrase", "testnode");
         settings = Settings.builder().put(settings)
+                .put("xpack.security.transport.ssl.enabled", false)
                 .put("xpack.security.http.ssl.enabled", true)
+                .put("xpack.security.http.ssl.certificate", certPath)
+                .put("xpack.security.http.ssl.key", keyPath)
                 .build();
         env = TestEnvironment.newEnvironment(settings);
         assertTrue(runCheck(settings, env).isFailure());
@@ -65,7 +71,7 @@ public class PkiRealmBootstrapCheckTests extends ESTestCase {
         env = TestEnvironment.newEnvironment(settings);
         assertTrue(runCheck(settings, env).isFailure());
 
-        // set transport client auth
+        // set transport auth
         settings = Settings.builder().put(settings)
                 .put("xpack.security.transport.client_authentication", randomFrom("required", "optional"))
                 .build();
@@ -74,6 +80,7 @@ public class PkiRealmBootstrapCheckTests extends ESTestCase {
 
         // test with transport profile
         settings = Settings.builder().put(settings)
+                .put("xpack.security.transport.ssl.enabled", true)
                 .put("xpack.security.transport.client_authentication", "none")
                 .put("transport.profiles.foo.xpack.security.ssl.client_authentication", randomFrom("required", "optional"))
                 .build();
@@ -82,14 +89,35 @@ public class PkiRealmBootstrapCheckTests extends ESTestCase {
     }
 
     private BootstrapCheck.BootstrapCheckResult runCheck(Settings settings, Environment env) throws Exception {
-        return new PkiRealmBootstrapCheck(new SSLService(settings, env)).check(new BootstrapContext(settings, null));
+        return new PkiRealmBootstrapCheck(new SSLService(settings, env)).check(createTestContext(settings, null));
     }
 
     public void testBootstrapCheckWithDisabledRealm() throws Exception {
         Settings settings = Settings.builder()
                 .put("xpack.security.authc.realms.pki.test_pki.enabled", false)
-                .put("xpack.ssl.client_authentication", "none")
+                .put("xpack.security.transport.ssl.enabled", false)
+                .put("xpack.security.transport.ssl.client_authentication", "none")
                 .put("path.home", createTempDir())
+                .build();
+        Environment env = TestEnvironment.newEnvironment(settings);
+        assertFalse(runCheck(settings, env).isFailure());
+    }
+
+    public void testBootstrapCheckWithDelegationEnabled() throws Exception {
+        final Path certPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/testnode.crt");
+        final Path keyPath = getDataPath("/org/elasticsearch/xpack/security/transport/ssl/certs/simple/testnode.pem");
+        MockSecureSettings secureSettings = new MockSecureSettings();
+        // enable transport tls
+        secureSettings.setString("xpack.security.transport.ssl.secure_key_passphrase", "testnode");
+        Settings settings = Settings.builder()
+                .put("xpack.security.authc.realms.pki.test_pki.enabled", true)
+                .put("xpack.security.authc.realms.pki.test_pki.delegation.enabled", true)
+                .put("xpack.security.transport.ssl.enabled", randomBoolean())
+                .put("xpack.security.transport.ssl.client_authentication", "none")
+                .put("xpack.security.transport.ssl.certificate", certPath.toString())
+                .put("xpack.security.transport.ssl.key", keyPath.toString())
+                .put("path.home", createTempDir())
+                .setSecureSettings(secureSettings)
                 .build();
         Environment env = TestEnvironment.newEnvironment(settings);
         assertFalse(runCheck(settings, env).isFailure());
@@ -114,6 +142,6 @@ public class PkiRealmBootstrapCheckTests extends ESTestCase {
         Environment env = TestEnvironment.newEnvironment(settings);
         final PkiRealmBootstrapCheck check = new PkiRealmBootstrapCheck(new SSLService(settings, env));
         secureSettings.close();
-        assertThat(check.check(new BootstrapContext(settings, null)).isFailure(), Matchers.equalTo(expectFail));
+        assertThat(check.check(createTestContext(settings, null)).isFailure(), Matchers.equalTo(expectFail));
     }
 }

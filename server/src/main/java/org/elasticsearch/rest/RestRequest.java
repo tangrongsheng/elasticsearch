@@ -40,6 +40,7 @@ import org.elasticsearch.http.HttpRequest;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -65,6 +66,12 @@ public class RestRequest implements ToXContent.Params {
     private final SetOnce<XContentType> xContentType = new SetOnce<>();
     private final HttpRequest httpRequest;
     private final HttpChannel httpChannel;
+
+    private boolean contentConsumed = false;
+
+    public boolean isContentConsumed() {
+        return contentConsumed;
+    }
 
     protected RestRequest(NamedXContentRegistry xContentRegistry, Map<String, String> params, String path,
                           Map<String, List<String>> headers, HttpRequest httpRequest, HttpChannel httpChannel) {
@@ -147,6 +154,12 @@ public class RestRequest implements ToXContent.Params {
         GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH, TRACE, CONNECT
     }
 
+    /**
+     * Returns the HTTP method used in the REST request.
+     *
+     * @return the {@link Method} used in the REST request
+     * @throws IllegalArgumentException if the HTTP method is invalid
+     */
     public Method method() {
         return httpRequest.method();
     }
@@ -173,10 +186,15 @@ public class RestRequest implements ToXContent.Params {
     }
 
     public boolean hasContent() {
-        return content().length() > 0;
+        return contentLength() > 0;
+    }
+
+    public int contentLength() {
+        return httpRequest.content().length();
     }
 
     public BytesReference content() {
+        this.contentConsumed = true;
         return httpRequest.content();
     }
 
@@ -231,13 +249,6 @@ public class RestRequest implements ToXContent.Params {
         return xContentType.get();
     }
 
-    /**
-     * Sets the {@link XContentType}
-     */
-    final void setXContentType(XContentType xContentType) {
-        this.xContentType.set(xContentType);
-    }
-
     public HttpChannel getHttpChannel() {
         return httpChannel;
     }
@@ -277,7 +288,7 @@ public class RestRequest implements ToXContent.Params {
      * @return the list of currently consumed parameters.
      */
     List<String> consumedParams() {
-        return consumedParams.stream().collect(Collectors.toList());
+        return new ArrayList<>(consumedParams);
     }
 
     /**

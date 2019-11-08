@@ -20,6 +20,8 @@
 package org.elasticsearch.action.admin.indices.mapping.get;
 
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.Version;
+import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.admin.indices.mapping.get.GetFieldMappingsResponse.FieldMappingMetaData;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.single.shard.TransportSingleShardAction;
@@ -31,6 +33,7 @@ import org.elasticsearch.cluster.routing.ShardsIterator;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentHelper;
@@ -61,6 +64,7 @@ public class TransportGetFieldMappingsIndexAction
         extends TransportSingleShardAction<GetFieldMappingsIndexRequest, GetFieldMappingsResponse> {
 
     private static final String ACTION_NAME = GetFieldMappingsAction.NAME + "[index]";
+    public static final ActionType<GetFieldMappingsResponse> TYPE = new ActionType<>(ACTION_NAME, GetFieldMappingsResponse::new);
 
     protected final ClusterService clusterService;
     private final IndicesService indicesService;
@@ -91,7 +95,8 @@ public class TransportGetFieldMappingsIndexAction
     protected GetFieldMappingsResponse shardOperation(final GetFieldMappingsIndexRequest request, ShardId shardId) {
         assert shardId != null;
         IndexService indexService = indicesService.indexServiceSafe(shardId.getIndex());
-        Predicate<String> metadataFieldPredicate = indicesService::isMetaDataField;
+        Version indexCreatedVersion = indexService.mapperService().getIndexSettings().getIndexVersionCreated();
+        Predicate<String> metadataFieldPredicate = (f) -> indicesService.isMetaDataField(indexCreatedVersion, f);
         Predicate<String> fieldPredicate = metadataFieldPredicate.or(indicesService.getFieldFilter().apply(shardId.getIndexName()));
 
         DocumentMapper mapper = indexService.mapperService().documentMapper();
@@ -111,7 +116,7 @@ public class TransportGetFieldMappingsIndexAction
 
         Map<String, Map<String, FieldMappingMetaData>> typeMappings = new HashMap<>();
         for (String type : typeIntersection) {
-            DocumentMapper documentMapper = indexService.mapperService().documentMapper(type);
+            DocumentMapper documentMapper = indexService.mapperService().documentMapper();
             Map<String, FieldMappingMetaData> fieldMapping = findFieldMappingsByType(fieldPredicate, documentMapper, request);
             if (!fieldMapping.isEmpty()) {
                 typeMappings.put(type, fieldMapping);
@@ -121,8 +126,8 @@ public class TransportGetFieldMappingsIndexAction
     }
 
     @Override
-    protected GetFieldMappingsResponse newResponse() {
-        return new GetFieldMappingsResponse();
+    protected Writeable.Reader<GetFieldMappingsResponse> getResponseReader() {
+        return GetFieldMappingsResponse::new;
     }
 
     @Override

@@ -5,32 +5,40 @@
  */
 package org.elasticsearch.xpack.ml.rest.datafeeds;
 
+import org.apache.logging.log4j.LogManager;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.action.RestToXContentListener;
-import org.elasticsearch.xpack.ml.MachineLearning;
 import org.elasticsearch.xpack.core.ml.action.GetDatafeedsStatsAction;
 import org.elasticsearch.xpack.core.ml.datafeed.DatafeedConfig;
+import org.elasticsearch.xpack.ml.MachineLearning;
 
 import java.io.IOException;
 
+import static org.elasticsearch.rest.RestRequest.Method.GET;
+
 public class RestGetDatafeedStatsAction extends BaseRestHandler {
 
-    public RestGetDatafeedStatsAction(Settings settings, RestController controller) {
-        super(settings);
-        controller.registerHandler(RestRequest.Method.GET, MachineLearning.BASE_PATH
-                + "datafeeds/{" + DatafeedConfig.ID.getPreferredName() + "}/_stats", this);
-        controller.registerHandler(RestRequest.Method.GET, MachineLearning.BASE_PATH
-                + "datafeeds/_stats", this);
+    private static final DeprecationLogger deprecationLogger =
+        new DeprecationLogger(LogManager.getLogger(RestGetDatafeedStatsAction.class));
+
+    public RestGetDatafeedStatsAction(RestController controller) {
+        // TODO: remove deprecated endpoint in 8.0.0
+        controller.registerWithDeprecatedHandler(
+            GET, MachineLearning.BASE_PATH + "datafeeds/{" + DatafeedConfig.ID.getPreferredName() + "}/_stats", this,
+            GET, MachineLearning.PRE_V7_BASE_PATH + "datafeeds/{" + DatafeedConfig.ID.getPreferredName() + "}/_stats", deprecationLogger);
+        controller.registerWithDeprecatedHandler(
+            GET, MachineLearning.BASE_PATH + "datafeeds/_stats", this,
+            GET, MachineLearning.PRE_V7_BASE_PATH + "datafeeds/_stats", deprecationLogger);
     }
 
     @Override
     public String getName() {
-        return "xpack_ml_get_datafeed_stats_action";
+        return "ml_get_datafeed_stats_action";
     }
 
     @Override

@@ -22,7 +22,6 @@ package org.elasticsearch.index.engine;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.index.IndexSettings;
-import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.ParsedDocument;
 import org.elasticsearch.index.translog.SnapshotMatchers;
@@ -32,12 +31,12 @@ import org.junit.Before;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -77,7 +76,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             if (randomBoolean()) {
                 engine.index(indexForDoc(doc));
             } else {
-                engine.delete(new Engine.Delete(doc.type(), doc.id(), newUid(doc.id()), primaryTerm.get()));
+                engine.delete(new Engine.Delete(doc.id(), newUid(doc.id()), primaryTerm.get()));
             }
             if (rarely()) {
                 if (randomBoolean()) {
@@ -94,7 +93,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
 
             Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL);
             try (Translog.Snapshot snapshot = new LuceneChangesSnapshot(
-                searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, false)) {
+                    searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, false)) {
                 searcher = null;
                 assertThat(snapshot, SnapshotMatchers.size(0));
             } finally {
@@ -116,7 +115,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             toSeqNo = randomLongBetween(refreshedSeqNo + 1, numOps * 2);
             Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL);
             try (Translog.Snapshot snapshot = new LuceneChangesSnapshot(
-                searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, false)) {
+                    searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, false)) {
                 searcher = null;
                 assertThat(snapshot, SnapshotMatchers.containsSeqNoRange(fromSeqNo, refreshedSeqNo));
             } finally {
@@ -135,7 +134,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             toSeqNo = randomLongBetween(fromSeqNo, refreshedSeqNo);
             searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL);
             try (Translog.Snapshot snapshot = new LuceneChangesSnapshot(
-                searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, true)) {
+                    searcher, mapperService, between(1, LuceneChangesSnapshot.DEFAULT_BATCH_SIZE), fromSeqNo, toSeqNo, true)) {
                 searcher = null;
                 assertThat(snapshot, SnapshotMatchers.containsSeqNoRange(fromSeqNo, toSeqNo));
             } finally {
@@ -150,47 +149,45 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
         }
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/pull/34667")
-    public void testDedupByPrimaryTerm() throws Exception {
-        Map<Long, Long> latestOperations = new HashMap<>();
-        List<Integer> terms = Arrays.asList(between(1, 1000), between(1000, 2000));
+    /**
+     * A nested document is indexed into Lucene as multiple documents. While the root document has both sequence number and primary term,
+     * non-root documents don't have primary term but only sequence numbers. This test verifies that {@link LuceneChangesSnapshot}
+     * correctly skip non-root documents and returns at most one operation per sequence number.
+     */
+    public void testSkipNonRootOfNestedDocuments() throws Exception {
+        Map<Long, Long> seqNoToTerm = new HashMap<>();
+        List<Engine.Operation> operations = generateHistoryOnReplica(between(1, 100), randomBoolean(), randomBoolean(), randomBoolean());
         int totalOps = 0;
-        for (long term : terms) {
-            final List<Engine.Operation> ops = generateSingleDocHistory(true,
-                randomFrom(VersionType.INTERNAL, VersionType.EXTERNAL, VersionType.EXTERNAL_GTE), term, 2, 20, "1");
-            primaryTerm.set(Math.max(primaryTerm.get(), term));
-            engine.rollTranslogGeneration();
-            for (Engine.Operation op : ops) {
-                // We need to simulate a rollback here as only ops after local checkpoint get into the engine
-                if (op.seqNo() <= engine.getLocalCheckpointTracker().getCheckpoint()) {
-                    engine.getLocalCheckpointTracker().resetCheckpoint(randomLongBetween(-1, op.seqNo() - 1));
-                    engine.rollTranslogGeneration();
-                }
+        for (Engine.Operation op : operations) {
+            if (engine.getLocalCheckpointTracker().hasProcessed(op.seqNo()) == false) {
+                seqNoToTerm.put(op.seqNo(), op.primaryTerm());
                 if (op instanceof Engine.Index) {
-                    engine.index((Engine.Index) op);
-                } else if (op instanceof Engine.Delete) {
-                    engine.delete((Engine.Delete) op);
+                    totalOps += ((Engine.Index) op).docs().size();
+                } else {
+                    totalOps++;
                 }
-                latestOperations.put(op.seqNo(), op.primaryTerm());
-                if (rarely()) {
-                    engine.refresh("test");
-                }
-                if (rarely()) {
-                    engine.flush();
-                }
-                totalOps++;
+            }
+            applyOperation(engine, op);
+            if (rarely()) {
+                engine.refresh("test");
+            }
+            if (rarely()) {
+                engine.rollTranslogGeneration();
+            }
+            if (rarely()) {
+                engine.flush();
             }
         }
         long maxSeqNo = engine.getLocalCheckpointTracker().getMaxSeqNo();
         engine.refresh("test");
         Engine.Searcher searcher = engine.acquireSearcher("test", Engine.SearcherScope.INTERNAL);
         try (Translog.Snapshot snapshot = new LuceneChangesSnapshot(searcher, mapperService, between(1, 100), 0, maxSeqNo, false)) {
-            searcher = null;
+                searcher = null;
             Translog.Operation op;
             while ((op = snapshot.next()) != null) {
-                assertThat(op.toString(), op.primaryTerm(), equalTo(latestOperations.get(op.seqNo())));
+                assertThat(op.toString(), op.primaryTerm(), equalTo(seqNoToTerm.get(op.seqNo())));
             }
-            assertThat(snapshot.skippedOperations(), equalTo(totalOps - latestOperations.size()));
+            assertThat(snapshot.skippedOperations(), equalTo(totalOps - seqNoToTerm.size()));
         } finally {
             IOUtils.close(searcher);
         }
@@ -215,7 +212,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
                 if (randomBoolean()) {
                     op = new Engine.Index(newUid(doc), primaryTerm.get(), doc);
                 } else {
-                    op = new Engine.Delete(doc.type(), doc.id(), newUid(doc.id()), primaryTerm.get());
+                    op = new Engine.Delete(doc.id(), newUid(doc.id()), primaryTerm.get());
                 }
             } else {
                 if (randomBoolean()) {
@@ -229,7 +226,7 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
         readyLatch.countDown();
         readyLatch.await();
         concurrentlyApplyOps(operations, engine);
-        assertThat(engine.getLocalCheckpointTracker().getCheckpoint(), equalTo(operations.size() - 1L));
+        assertThat(engine.getLocalCheckpointTracker().getProcessedCheckpoint(), equalTo(operations.size() - 1L));
         isDone.set(true);
         for (Follower follower : followers) {
             follower.join();
@@ -238,13 +235,13 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
     }
 
     class Follower extends Thread {
-        private final Engine leader;
+        private final InternalEngine leader;
         private final InternalEngine engine;
         private final TranslogHandler translogHandler;
         private final AtomicBoolean isDone;
         private final CountDownLatch readLatch;
 
-        Follower(Engine leader, AtomicBoolean isDone, CountDownLatch readLatch) throws IOException {
+        Follower(InternalEngine leader, AtomicBoolean isDone, CountDownLatch readLatch) throws IOException {
             this.leader = leader;
             this.isDone = isDone;
             this.readLatch = readLatch;
@@ -253,9 +250,9 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
             this.engine = createEngine(createStore(), createTempDir());
         }
 
-        void pullOperations(Engine follower) throws IOException {
-            long leaderCheckpoint = leader.getLocalCheckpoint();
-            long followerCheckpoint = follower.getLocalCheckpoint();
+        void pullOperations(InternalEngine follower) throws IOException {
+            long leaderCheckpoint = leader.getLocalCheckpointTracker().getProcessedCheckpoint();
+            long followerCheckpoint = follower.getLocalCheckpointTracker().getProcessedCheckpoint();
             if (followerCheckpoint < leaderCheckpoint) {
                 long fromSeqNo = followerCheckpoint + 1;
                 long batchSize = randomLongBetween(0, 100);
@@ -272,11 +269,19 @@ public class LuceneChangesSnapshotTests extends EngineTestCase {
                 readLatch.countDown();
                 readLatch.await();
                 while (isDone.get() == false ||
-                    engine.getLocalCheckpointTracker().getCheckpoint() < leader.getLocalCheckpoint()) {
+                    engine.getLocalCheckpointTracker().getProcessedCheckpoint() <
+                        leader.getLocalCheckpointTracker().getProcessedCheckpoint()) {
                     pullOperations(engine);
                 }
                 assertConsistentHistoryBetweenTranslogAndLuceneIndex(engine, mapperService);
-                assertThat(getDocIds(engine, true), equalTo(getDocIds(leader, true)));
+                // have to verify without source since we are randomly testing without _source
+                List<DocIdSeqNoAndSource> docsWithoutSourceOnFollower = getDocIds(engine, true).stream()
+                    .map(d -> new DocIdSeqNoAndSource(d.getId(), null, d.getSeqNo(), d.getPrimaryTerm(), d.getVersion()))
+                    .collect(Collectors.toList());
+                List<DocIdSeqNoAndSource> docsWithoutSourceOnLeader = getDocIds(leader, true).stream()
+                    .map(d -> new DocIdSeqNoAndSource(d.getId(), null, d.getSeqNo(), d.getPrimaryTerm(), d.getVersion()))
+                    .collect(Collectors.toList());
+                assertThat(docsWithoutSourceOnFollower, equalTo(docsWithoutSourceOnLeader));
             } catch (Exception ex) {
                 throw new AssertionError(ex);
             }

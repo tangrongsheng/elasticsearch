@@ -7,6 +7,7 @@ package org.elasticsearch.xpack.ccr.action;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateRequest;
+import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.action.support.master.TransportMasterNodeAction;
@@ -20,7 +21,9 @@ import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.license.LicenseUtils;
+import org.elasticsearch.tasks.Task;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xpack.ccr.CcrLicenseChecker;
@@ -28,6 +31,7 @@ import org.elasticsearch.xpack.core.ccr.AutoFollowMetadata;
 import org.elasticsearch.xpack.core.ccr.AutoFollowMetadata.AutoFollowPattern;
 import org.elasticsearch.xpack.core.ccr.action.PutAutoFollowPatternAction;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -63,12 +67,12 @@ public class TransportPutAutoFollowPatternAction extends
     }
 
     @Override
-    protected AcknowledgedResponse newResponse() {
-        return new AcknowledgedResponse();
+    protected AcknowledgedResponse read(StreamInput in) throws IOException {
+        return new AcknowledgedResponse(in);
     }
 
     @Override
-    protected void masterOperation(PutAutoFollowPatternAction.Request request,
+    protected void masterOperation(Task task, PutAutoFollowPatternAction.Request request,
                                    ClusterState state,
                                    ActionListener<AcknowledgedResponse> listener) throws Exception {
         if (ccrLicenseChecker.isCcrAllowed() == false) {
@@ -80,7 +84,7 @@ public class TransportPutAutoFollowPatternAction extends
             .filter(e -> ShardFollowTask.HEADER_FILTERS.contains(e.getKey()))
             .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
-        Consumer<ClusterState> consumer = remoteClusterState -> {
+        Consumer<ClusterStateResponse> consumer = remoteClusterState -> {
             String[] indices = request.getLeaderIndexPatterns().toArray(new String[0]);
             ccrLicenseChecker.hasPrivilegesToFollowIndices(remoteClient, indices, e -> {
                 if (e == null) {
@@ -94,7 +98,7 @@ public class TransportPutAutoFollowPatternAction extends
 
                             @Override
                             public ClusterState execute(ClusterState currentState) throws Exception {
-                                return innerPut(request, filteredHeaders, currentState, remoteClusterState);
+                                return innerPut(request, filteredHeaders, currentState, remoteClusterState.getState());
                             }
                         });
                 } else {
@@ -146,8 +150,7 @@ public class TransportPutAutoFollowPatternAction extends
             markExistingIndicesAsAutoFollowedForNewPatterns(request.getLeaderIndexPatterns(), remoteClusterState.metaData(),
                 previousPattern, followedIndexUUIDs);
         } else {
-            markExistingIndicesAsAutoFollowed(request.getLeaderIndexPatterns(), remoteClusterState.metaData(),
-                followedIndexUUIDs);
+            markExistingIndicesAsAutoFollowed(request.getLeaderIndexPatterns(), remoteClusterState.metaData(), followedIndexUUIDs);
         }
 
         if (filteredHeaders != null) {
@@ -158,16 +161,17 @@ public class TransportPutAutoFollowPatternAction extends
             request.getRemoteCluster(),
             request.getLeaderIndexPatterns(),
             request.getFollowIndexNamePattern(),
-            request.getMaxReadRequestOperationCount(),
-            request.getMaxReadRequestSize(),
-            request.getMaxConcurrentReadBatches(),
-            request.getMaxWriteRequestOperationCount(),
-            request.getMaxWriteRequestSize(),
-            request.getMaxConcurrentWriteBatches(),
-            request.getMaxWriteBufferCount(),
-            request.getMaxWriteBufferSize(),
-            request.getMaxRetryDelay(),
-            request.getReadPollTimeout());
+            true,
+            request.getParameters().getMaxReadRequestOperationCount(),
+            request.getParameters().getMaxWriteRequestOperationCount(),
+            request.getParameters().getMaxOutstandingReadRequests(),
+            request.getParameters().getMaxOutstandingWriteRequests(),
+            request.getParameters().getMaxReadRequestSize(),
+            request.getParameters().getMaxWriteRequestSize(),
+            request.getParameters().getMaxWriteBufferCount(),
+            request.getParameters().getMaxWriteBufferSize(),
+            request.getParameters().getMaxRetryDelay(),
+            request.getParameters().getReadPollTimeout());
         patterns.put(request.getName(), autoFollowPattern);
         ClusterState.Builder newState = ClusterState.builder(localState);
         newState.metaData(MetaData.builder(localState.getMetaData())

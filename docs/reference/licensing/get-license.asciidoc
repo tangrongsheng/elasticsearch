@@ -1,7 +1,10 @@
 [role="xpack"]
 [testenv="basic"]
 [[get-license]]
-=== Get License API
+=== Get license API
+++++
+<titleabbrev>Get license</titleabbrev>
+++++
 
 This API enables you to retrieve licensing information.
 
@@ -32,8 +35,7 @@ https://www.elastic.co/subscriptions.
 ==== Authorization
 
 You must have `monitor` cluster privileges to use this API.
-For more information, see
-{xpack-ref}/security-privileges.html[Security Privileges].
+For more information, see <<security-privileges>>.
 
 
 [float]
@@ -41,13 +43,12 @@ For more information, see
 
 The following example provides information about a trial license:
 
-[source,js]
+[source,console]
 --------------------------------------------------
 GET /_license
 --------------------------------------------------
-// CONSOLE
 
-[source,js]
+[source,console-result]
 --------------------------------------------------
 {
   "license" : {

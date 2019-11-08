@@ -6,11 +6,7 @@
 
 package org.elasticsearch.xpack.sql.plugin;
 
-import org.apache.logging.log4j.LogManager;
-import org.elasticsearch.Version;
 import org.elasticsearch.client.node.NodeClient;
-import org.elasticsearch.common.logging.DeprecationLogger;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
@@ -26,51 +22,26 @@ import org.elasticsearch.xpack.sql.action.SqlQueryRequest;
 import org.elasticsearch.xpack.sql.action.SqlQueryResponse;
 import org.elasticsearch.xpack.sql.proto.Mode;
 import org.elasticsearch.xpack.sql.proto.Protocol;
-import org.elasticsearch.xpack.sql.proto.RequestInfo;
-import org.elasticsearch.xpack.sql.session.Cursor;
-import org.elasticsearch.xpack.sql.session.Cursors;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Locale;
 
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 import static org.elasticsearch.rest.RestRequest.Method.POST;
-import static org.elasticsearch.xpack.sql.proto.RequestInfo.CANVAS;
-import static org.elasticsearch.xpack.sql.proto.RequestInfo.CLI;
 
 public class RestSqlQueryAction extends BaseRestHandler {
 
-    private static final DeprecationLogger deprecationLogger = new DeprecationLogger(LogManager.getLogger(RestSqlQueryAction.class));
-
-    private static String CLIENT_ID = "client.id";
-
-    RestSqlQueryAction(Settings settings, RestController controller) {
-        super(settings);
-        // TODO: remove deprecated endpoint in 8.0.0
-        controller.registerWithDeprecatedHandler(
-                GET, Protocol.SQL_QUERY_REST_ENDPOINT, this,
-                GET, Protocol.SQL_QUERY_DEPRECATED_REST_ENDPOINT, deprecationLogger);
-        // TODO: remove deprecated endpoint in 8.0.0
-        controller.registerWithDeprecatedHandler(
-                POST, Protocol.SQL_QUERY_REST_ENDPOINT, this,
-                POST, Protocol.SQL_QUERY_DEPRECATED_REST_ENDPOINT, deprecationLogger);
+    public RestSqlQueryAction(RestController controller) {
+        controller.registerHandler(GET, Protocol.SQL_QUERY_REST_ENDPOINT, this);
+        controller.registerHandler(POST, Protocol.SQL_QUERY_REST_ENDPOINT, this);
     }
 
     @Override
-    protected RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) throws IOException {
+    protected RestChannelConsumer prepareRequest(RestRequest request, NodeClient client)
+            throws IOException {
         SqlQueryRequest sqlRequest;
         try (XContentParser parser = request.contentOrSourceParamParser()) {
-            String clientId = request.param(CLIENT_ID);
-            if (clientId != null) {
-                clientId = clientId.toLowerCase(Locale.ROOT);
-                if (!clientId.equals(CLI) && !clientId.equals(CANVAS)) {
-                    clientId = null;
-                }
-            }
-            
-            sqlRequest = SqlQueryRequest.fromXContent(parser,
-                    new RequestInfo(Mode.fromString(request.param("mode")), clientId));
+            sqlRequest = SqlQueryRequest.fromXContent(parser);
         }
 
         /*
@@ -85,7 +56,15 @@ public class RestSqlQueryAction extends BaseRestHandler {
          * isn't but there is a {@code Accept} header then we use that. If there
          * isn't then we use the {@code Content-Type} header which is required.
          */
-        String accept = request.param("format");
+        String accept = null;
+        
+        if ((Mode.isDriver(sqlRequest.requestInfo().mode()) || sqlRequest.requestInfo().mode() == Mode.CLI)
+                && (sqlRequest.binaryCommunication() == null || sqlRequest.binaryCommunication() == true)) {
+            // enforce CBOR response for drivers and CLI (unless instructed differently through the config param)
+            accept = XContentType.CBOR.name();
+        } else {
+            accept = request.param("format");
+        }
         if (accept == null) {
             accept = request.header("Accept");
             if ("*/*".equals(accept)) {
@@ -106,36 +85,38 @@ public class RestSqlQueryAction extends BaseRestHandler {
          * which we turn into a 400 error.
          */
         XContentType xContentType = accept == null ? XContentType.JSON : XContentType.fromMediaTypeOrFormat(accept);
-        if (xContentType != null) {
-            return channel -> client.execute(SqlQueryAction.INSTANCE, sqlRequest, new RestResponseListener<SqlQueryResponse>(channel) {
-                @Override
-                public RestResponse buildResponse(SqlQueryResponse response) throws Exception {
-                    XContentBuilder builder = XContentBuilder.builder(xContentType.xContent());
-                    response.toXContent(builder, request);
-                    return new BytesRestResponse(RestStatus.OK, builder);
-                }
-            });
-        }
+        TextFormat textFormat = xContentType == null ? TextFormat.fromMediaTypeOrFormat(accept) : null;
 
-        TextFormat textFormat = TextFormat.fromMediaTypeOrFormat(accept);
+        if (xContentType == null && sqlRequest.columnar()) {
+            throw new IllegalArgumentException("Invalid use of [columnar] argument: cannot be used in combination with "
+                    + "txt, csv or tsv formats");
+        }
 
         long startNanos = System.nanoTime();
         return channel -> client.execute(SqlQueryAction.INSTANCE, sqlRequest, new RestResponseListener<SqlQueryResponse>(channel) {
             @Override
             public RestResponse buildResponse(SqlQueryResponse response) throws Exception {
-                Cursor cursor = Cursors.decodeFromString(sqlRequest.cursor());
-                final String data = textFormat.format(cursor, request, response);
+                RestResponse restResponse;
 
-                RestResponse restResponse = new BytesRestResponse(RestStatus.OK, textFormat.contentType(request),
+                // XContent branch
+                if (xContentType != null) {
+                    XContentBuilder builder = channel.newBuilder(request.getXContentType(), xContentType, true);
+                    response.toXContent(builder, request);
+                    restResponse = new BytesRestResponse(RestStatus.OK, builder);
+                }
+                // TextFormat
+                else {
+                    final String data = textFormat.format(request, response);
+
+                    restResponse = new BytesRestResponse(RestStatus.OK, textFormat.contentType(request),
                         data.getBytes(StandardCharsets.UTF_8));
 
-                Cursor responseCursor = textFormat.wrapCursor(cursor, response);
-
-                if (responseCursor != Cursor.EMPTY) {
-                    restResponse.addHeader("Cursor", Cursors.encodeToString(Version.CURRENT, responseCursor));
+                    if (response.hasCursor()) {
+                        restResponse.addHeader("Cursor", response.cursor());
+                    }
                 }
-                restResponse.addHeader("Took-nanos", Long.toString(System.nanoTime() - startNanos));
 
+                restResponse.addHeader("Took-nanos", Long.toString(System.nanoTime() - startNanos));
                 return restResponse;
             }
         });
@@ -145,5 +126,4 @@ public class RestSqlQueryAction extends BaseRestHandler {
     public String getName() {
         return "sql_query";
     }
-
 }

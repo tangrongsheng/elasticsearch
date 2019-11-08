@@ -41,11 +41,7 @@ import static org.elasticsearch.rest.RestRequest.Method.HEAD;
  */
 public class RestGetIndicesAction extends BaseRestHandler {
 
-
-    public RestGetIndicesAction(
-            final Settings settings,
-            final RestController controller) {
-        super(settings);
+    public RestGetIndicesAction(final RestController controller) {
         controller.registerHandler(GET, "/{index}", this);
         controller.registerHandler(HEAD, "/{index}", this);
     }
@@ -68,9 +64,12 @@ public class RestGetIndicesAction extends BaseRestHandler {
         return channel -> client.admin().indices().getIndex(getIndexRequest, new RestToXContentListener<>(channel));
     }
 
+    /**
+     * Parameters used for controlling the response and thus might not be consumed during
+     * preparation of the request execution in {@link BaseRestHandler#prepareRequest(RestRequest, NodeClient)}.
+     */
     @Override
     protected Set<String> responseParams() {
         return Settings.FORMAT_PARAMS;
     }
-
 }

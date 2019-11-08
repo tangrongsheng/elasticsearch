@@ -8,17 +8,16 @@ package org.elasticsearch.xpack.sql.expression.predicate.operator.arithmetic;
 
 import org.elasticsearch.xpack.sql.expression.Expression;
 import org.elasticsearch.xpack.sql.expression.predicate.operator.arithmetic.BinaryArithmeticProcessor.BinaryArithmeticOperation;
-import org.elasticsearch.xpack.sql.tree.Location;
+import org.elasticsearch.xpack.sql.tree.Source;
 import org.elasticsearch.xpack.sql.type.DataType;
 import org.elasticsearch.xpack.sql.type.DataTypeConversion;
-import org.elasticsearch.xpack.sql.type.DataTypes;
 
 import static org.elasticsearch.common.logging.LoggerMessageFormat.format;
 
 abstract class DateTimeArithmeticOperation extends ArithmeticOperation {
 
-    DateTimeArithmeticOperation(Location location, Expression left, Expression right, BinaryArithmeticOperation operation) {
-        super(location, left, right, operation);
+    DateTimeArithmeticOperation(Source source, Expression left, Expression right, BinaryArithmeticOperation operation) {
+        super(source, left, right, operation);
     }
     
     @Override
@@ -41,16 +40,25 @@ abstract class DateTimeArithmeticOperation extends ArithmeticOperation {
             return TypeResolution.TYPE_RESOLVED;
         }
         // 2. 3. 4. intervals
-        if ((DataTypes.isInterval(l) || DataTypes.isInterval(r))) {
+        if (l.isInterval() || r.isInterval()) {
             if (DataTypeConversion.commonType(l, r) == null) {
-                return new TypeResolution(format("[{}] has arguments with incompatible types [{}] and [{}]", symbol(), l, r));
+                return new TypeResolution(format(null, "[{}] has arguments with incompatible types [{}] and [{}]", symbol(), l, r));
             } else {
-                return TypeResolution.TYPE_RESOLVED;
+                return resolveWithIntervals();
             }
         }
 
         // fall-back to default checks
         return super.resolveType();
     }
-    
+
+    protected TypeResolution resolveWithIntervals() {
+        DataType l = left().dataType();
+        DataType r = right().dataType();
+
+        if (!(r.isDateOrTimeBased() || r.isInterval())|| !(l.isDateOrTimeBased() || l.isInterval())) {
+            return new TypeResolution(format(null, "[{}] has arguments with incompatible types [{}] and [{}]", symbol(), l, r));
+        }
+        return TypeResolution.TYPE_RESOLVED;
+    }
 }

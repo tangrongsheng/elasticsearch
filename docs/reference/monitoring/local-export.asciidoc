@@ -1,7 +1,7 @@
 [role="xpack"]
 [testenv="basic"]
 [[local-exporter]]
-=== Local Exporters
+=== Local exporters
 
 The `local` exporter is the default exporter in {monitoring}. It routes data 
 back into the same (local) cluster. In other words, it uses the production 
@@ -47,16 +47,16 @@ a message indicating that they are waiting for the resources to be set up.
 
 One benefit of the `local` exporter is that it lives within the cluster and
 therefore no extra configuration is required when the cluster is secured with
-{security}. All operations, including indexing operations, that occur from a 
-`local` exporter make use of the internal transport mechanisms within {es}. This 
-behavior enables the exporter to be used without providing any user credentials 
-when {security} is enabled. 
+{stack} {security-features}. All operations, including indexing operations, that
+occur from a `local` exporter make use of the internal transport mechanisms
+within {es}. This behavior enables the exporter to be used without providing any
+user credentials when {security-features} are enabled. 
 
 For more information about the configuration options for the `local` exporter, 
 see <<local-exporter-settings>>.
 
 [[local-exporter-cleaner]]
-==== Cleaner Service
+==== Cleaner service
 
 One feature of the `local` exporter, which is not present in the `http` exporter, 
 is a cleaner service. The cleaner service runs once per day at 01:00 AM UTC on 

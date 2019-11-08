@@ -85,24 +85,14 @@ public class Params {
                 String s = a.aggProperty() != null ? a.aggProperty() : a.aggName();
                 map.put(p.prefix() + aggs++, s);
             }
+            if (p instanceof Grouping) {
+                Grouping g = (Grouping) p;
+                map.put(p.prefix() + aggs++, g.groupName());
+            }
         }
 
         return map;
     }
-
-    // return the agg refs
-    List<String> asAggRefs() {
-        List<String> refs = new ArrayList<>();
-
-        for (Param<?> p : params) {
-            if (p instanceof Agg) {
-                refs.add(((Agg) p).aggName());
-            }
-        }
-
-        return refs;
-    }
-
 
     private static List<Param<?>> flatten(List<Param<?>> params) {
         List<Param<?>> flatten = emptyList();
@@ -114,6 +104,9 @@ public class Params {
                     flatten.addAll(flatten(((Script) p).value().params));
                 }
                 else if (p instanceof Agg) {
+                    flatten.add(p);
+                }
+                else if (p instanceof Grouping) {
                     flatten.add(p);
                 }
                 else if (p instanceof Var) {
@@ -130,5 +123,18 @@ public class Params {
     @Override
     public String toString() {
         return params.toString();
+    }
+
+    @Override
+    public int hashCode() {
+        return this.params.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if ((obj instanceof  Params) == false) {
+            return false;
+        }
+        return this.params.equals(((Params)obj).params);
     }
 }

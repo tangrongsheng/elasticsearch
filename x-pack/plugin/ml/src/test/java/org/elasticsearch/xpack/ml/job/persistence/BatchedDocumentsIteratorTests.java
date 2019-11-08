@@ -17,6 +17,7 @@ import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
+import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.ml.test.SearchHitBuilder;
 import org.junit.Before;
@@ -31,6 +32,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -136,8 +138,8 @@ public class BatchedDocumentsIteratorTests extends ESTestCase {
         SearchRequest searchRequest = searchRequests.get(0);
         assertThat(searchRequest.indices(), equalTo(new String[] {INDEX_NAME}));
         assertThat(searchRequest.scroll().keepAlive(), equalTo(TimeValue.timeValueMinutes(5)));
-        assertThat(searchRequest.types().length, equalTo(0));
         assertThat(searchRequest.source().query(), equalTo(QueryBuilders.matchAllQuery()));
+        assertThat(searchRequest.source().trackTotalHitsUpTo(), is(SearchContext.TRACK_TOTAL_HITS_ACCURATE));
     }
 
     private void assertSearchScrollRequests(int expectedCount) {
@@ -160,7 +162,7 @@ public class BatchedDocumentsIteratorTests extends ESTestCase {
             return this;
         }
 
-        @SuppressWarnings("unchecked")
+        @SuppressWarnings({"unchecked", "rawtypes"})
         void finishMock() {
             if (batches.isEmpty()) {
                 givenInitialResponse();

@@ -11,6 +11,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.ElasticsearchSecurityException;
 import org.elasticsearch.common.CheckedSupplier;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Settings;
@@ -18,6 +19,7 @@ import org.elasticsearch.env.Environment;
 import org.elasticsearch.xpack.core.XPackSettings;
 import org.elasticsearch.xpack.core.common.socket.SocketAccess;
 import org.elasticsearch.xpack.core.ssl.cert.CertificateInfo;
+import org.elasticsearch.xpack.core.watcher.WatcherField;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.KeyManagerFactory;
@@ -45,6 +47,7 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +55,7 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -61,6 +65,24 @@ import java.util.stream.Collectors;
 public class SSLService {
 
     private static final Logger logger = LogManager.getLogger(SSLService.class);
+    /**
+     * An ordered map of protocol algorithms to SSLContext algorithms. The map is ordered from most
+     * secure to least secure. The names in this map are taken from the
+     * <a href="https://docs.oracle.com/en/java/javase/11/docs/specs/security/standard-names.html#sslcontext-algorithms">
+     * Java Security Standard Algorithm Names Documentation for Java 11</a>.
+     */
+    private static final Map<String, String> ORDERED_PROTOCOL_ALGORITHM_MAP;
+    static {
+        LinkedHashMap<String, String> protocolAlgorithmMap = new LinkedHashMap<>();
+        protocolAlgorithmMap.put("TLSv1.3", "TLSv1.3");
+        protocolAlgorithmMap.put("TLSv1.2", "TLSv1.2");
+        protocolAlgorithmMap.put("TLSv1.1", "TLSv1.1");
+        protocolAlgorithmMap.put("TLSv1", "TLSv1");
+        protocolAlgorithmMap.put("SSLv3", "SSLv3");
+        protocolAlgorithmMap.put("SSLv2", "SSL");
+        protocolAlgorithmMap.put("SSLv2Hello", "SSL");
+        ORDERED_PROTOCOL_ALGORITHM_MAP = Collections.unmodifiableMap(protocolAlgorithmMap);
+    }
 
     private final Settings settings;
 
@@ -74,14 +96,12 @@ public class SSLService {
     private final Map<String, SSLConfiguration> sslConfigurations;
 
     /**
-     * A mapping from a SSLConfiguration to a pre-built context.
+     * A mapping from an SSLConfiguration to a pre-built context.
      * <p>
      * This is managed separately to the {@link #sslConfigurations} map, so that a single configuration (by object equality)
      * always maps to the same {@link SSLContextHolder}, even if it is being used within a different context-name.
      */
     private final Map<SSLConfiguration, SSLContextHolder> sslContexts;
-
-    private final SSLConfiguration globalSSLConfiguration;
     private final SetOnce<SSLConfiguration> transportSSLConfiguration = new SetOnce<>();
     private final Environment env;
 
@@ -92,16 +112,14 @@ public class SSLService {
     public SSLService(Settings settings, Environment environment) {
         this.settings = settings;
         this.env = environment;
-        this.globalSSLConfiguration = new SSLConfiguration(settings.getByPrefix(XPackSettings.GLOBAL_SSL_PREFIX));
         this.sslConfigurations = new HashMap<>();
         this.sslContexts = loadSSLConfigurations();
     }
 
-    private SSLService(Settings settings, Environment environment, SSLConfiguration globalSSLConfiguration,
-                       Map<String, SSLConfiguration> sslConfigurations, Map<SSLConfiguration, SSLContextHolder> sslContexts) {
+    private SSLService(Settings settings, Environment environment, Map<String, SSLConfiguration> sslConfigurations,
+                       Map<SSLConfiguration, SSLContextHolder> sslContexts) {
         this.settings = settings;
         this.env = environment;
-        this.globalSSLConfiguration = globalSSLConfiguration;
         this.sslConfigurations = sslConfigurations;
         this.sslContexts = sslContexts;
     }
@@ -112,7 +130,7 @@ public class SSLService {
      * have been created during initialization
      */
     public SSLService createDynamicSSLService() {
-        return new SSLService(settings, env, globalSSLConfiguration, sslConfigurations, sslContexts) {
+        return new SSLService(settings, env, sslConfigurations, sslContexts) {
 
             @Override
             Map<SSLConfiguration, SSLContextHolder> loadSSLConfigurations() {
@@ -201,9 +219,14 @@ public class SSLService {
      * @return Never {@code null}.
      */
     public SSLSocketFactory sslSocketFactory(SSLConfiguration configuration) {
-        SSLSocketFactory socketFactory = sslContext(configuration).getSocketFactory();
-        return new SecuritySSLSocketFactory(socketFactory, configuration.supportedProtocols().toArray(Strings.EMPTY_ARRAY),
-                supportedCiphers(socketFactory.getSupportedCipherSuites(), configuration.cipherSuites(), false));
+        final SSLContextHolder contextHolder = sslContextHolder(configuration);
+        SSLSocketFactory socketFactory = contextHolder.sslContext().getSocketFactory();
+        final SecuritySSLSocketFactory securitySSLSocketFactory = new SecuritySSLSocketFactory(
+            () -> contextHolder.sslContext().getSocketFactory(),
+            configuration.supportedProtocols().toArray(Strings.EMPTY_ARRAY),
+            supportedCiphers(socketFactory.getSupportedCipherSuites(), configuration.cipherSuites(), false));
+        contextHolder.addReloadListener(securitySSLSocketFactory::reload);
+        return securitySSLSocketFactory;
     }
 
     /**
@@ -225,7 +248,7 @@ public class SSLService {
         String[] supportedProtocols = configuration.supportedProtocols().toArray(Strings.EMPTY_ARRAY);
         SSLParameters parameters = new SSLParameters(ciphers, supportedProtocols);
         if (configuration.verificationMode().isHostnameVerificationEnabled() && host != null) {
-            // By default, a SSLEngine will not perform hostname verification. In order to perform hostname verification
+            // By default, an SSLEngine will not perform hostname verification. In order to perform hostname verification
             // we need to specify a EndpointIdentificationAlgorithm. We use the HTTPS algorithm to prevent against
             // man in the middle attacks for all of our connections.
             parameters.setEndpointIdentificationAlgorithm("HTTPS");
@@ -260,13 +283,6 @@ public class SSLService {
     }
 
     /**
-     * Returns the {@link SSLContext} for the global configuration. Mainly used for testing
-     */
-    public SSLContext sslContext() {
-        return sslContextHolder(globalSSLConfiguration).sslContext();
-    }
-
-    /**
      * Returns the {@link SSLContext} for the configuration. Mainly used for testing
      */
     public SSLContext sslContext(SSLConfiguration configuration) {
@@ -282,7 +298,7 @@ public class SSLService {
         Objects.requireNonNull(sslConfiguration, "SSL Configuration cannot be null");
         SSLContextHolder holder = sslContexts.get(sslConfiguration);
         if (holder == null) {
-            throw new IllegalArgumentException("did not find a SSLContext for [" + sslConfiguration.toString() + "]");
+            throw new IllegalArgumentException("did not find an SSLContext for [" + sslConfiguration.toString() + "]");
         }
         return holder;
     }
@@ -291,13 +307,10 @@ public class SSLService {
      * Returns the existing {@link SSLConfiguration} for the given settings
      *
      * @param settings the settings for the ssl configuration
-     * @return the ssl configuration for the provided settings. If the settings are empty, the global configuration is returned
+     * @return the ssl configuration for the provided settings
      */
-    SSLConfiguration sslConfiguration(Settings settings) {
-        if (settings.isEmpty()) {
-            return globalSSLConfiguration;
-        }
-        return new SSLConfiguration(settings, globalSSLConfiguration);
+    public SSLConfiguration sslConfiguration(Settings settings) {
+        return new SSLConfiguration(settings);
     }
 
     public Set<String> getTransportProfileContextNames() {
@@ -311,7 +324,7 @@ public class SSLService {
      * Accessor to the loaded ssl configuration objects at the current point in time. This is useful for testing
      */
     Collection<SSLConfiguration> getLoadedSSLConfigurations() {
-        return Collections.unmodifiableSet(new HashSet<>(sslContexts.keySet()));
+        return Set.copyOf(sslContexts.keySet());
     }
 
     /**
@@ -397,38 +410,70 @@ public class SSLService {
      */
     Map<SSLConfiguration, SSLContextHolder> loadSSLConfigurations() {
         Map<SSLConfiguration, SSLContextHolder> sslContextHolders = new HashMap<>();
-        sslContextHolders.put(globalSSLConfiguration, createSslContext(globalSSLConfiguration));
-        this.sslConfigurations.put("xpack.ssl", globalSSLConfiguration);
 
         Map<String, Settings> sslSettingsMap = new HashMap<>();
         sslSettingsMap.put(XPackSettings.HTTP_SSL_PREFIX, getHttpTransportSSLSettings(settings));
         sslSettingsMap.put("xpack.http.ssl", settings.getByPrefix("xpack.http.ssl."));
         sslSettingsMap.putAll(getRealmsSSLSettings(settings));
         sslSettingsMap.putAll(getMonitoringExporterSettings(settings));
+        sslSettingsMap.put(WatcherField.EMAIL_NOTIFICATION_SSL_PREFIX, settings.getByPrefix(WatcherField.EMAIL_NOTIFICATION_SSL_PREFIX));
 
-        sslSettingsMap.forEach((key, sslSettings) -> {
-            if (sslSettings.isEmpty()) {
-                storeSslConfiguration(key, globalSSLConfiguration);
-            } else {
-                final SSLConfiguration configuration = new SSLConfiguration(sslSettings, globalSSLConfiguration);
-                storeSslConfiguration(key, configuration);
-                sslContextHolders.computeIfAbsent(configuration, this::createSslContext);
-            }
-        });
+        sslSettingsMap.forEach((key, sslSettings) -> loadConfiguration(key, sslSettings, sslContextHolders));
 
         final Settings transportSSLSettings = settings.getByPrefix(XPackSettings.TRANSPORT_SSL_PREFIX);
-        final SSLConfiguration transportSSLConfiguration = new SSLConfiguration(transportSSLSettings, globalSSLConfiguration);
+        final SSLConfiguration transportSSLConfiguration =
+            loadConfiguration(XPackSettings.TRANSPORT_SSL_PREFIX, transportSSLSettings, sslContextHolders);
         this.transportSSLConfiguration.set(transportSSLConfiguration);
-        storeSslConfiguration(XPackSettings.TRANSPORT_SSL_PREFIX, transportSSLConfiguration);
         Map<String, Settings> profileSettings = getTransportProfileSSLSettings(settings);
-        sslContextHolders.computeIfAbsent(transportSSLConfiguration, this::createSslContext);
-        profileSettings.forEach((key, profileSetting) -> {
-            final SSLConfiguration configuration = new SSLConfiguration(profileSetting, transportSSLConfiguration);
-            storeSslConfiguration(key, configuration);
-            sslContextHolders.computeIfAbsent(configuration, this::createSslContext);
-        });
+        profileSettings.forEach((key, profileSetting) -> loadConfiguration(key, profileSetting, sslContextHolders));
+
+        for (String context : List.of("xpack.security.transport.ssl", "xpack.security.http.ssl")) {
+            validateServerConfiguration(context);
+        }
 
         return Collections.unmodifiableMap(sslContextHolders);
+    }
+
+    private SSLConfiguration loadConfiguration(String key, Settings settings, Map<SSLConfiguration, SSLContextHolder> contextHolders) {
+        if (key.endsWith(".")) {
+            // Drop trailing '.' so that any exception messages are consistent
+            key = key.substring(0, key.length() - 1);
+        }
+        try {
+            final SSLConfiguration configuration = new SSLConfiguration(settings);
+            storeSslConfiguration(key, configuration);
+            contextHolders.computeIfAbsent(configuration, this::createSslContext);
+            return configuration;
+        } catch (Exception e) {
+            throw new ElasticsearchSecurityException("failed to load SSL configuration [{}]", e, key);
+        }
+    }
+
+    private void validateServerConfiguration(String prefix) {
+        assert prefix.endsWith(".ssl");
+        SSLConfiguration configuration = getSSLConfiguration(prefix);
+        final String enabledSetting = prefix + ".enabled";
+        if (settings.getAsBoolean(enabledSetting, false) == true) {
+            // Client Authentication _should_ be required, but if someone turns it off, then this check is no longer relevant
+            final SSLConfigurationSettings configurationSettings = SSLConfigurationSettings.withPrefix(prefix + ".");
+            if (isConfigurationValidForServerUsage(configuration) == false) {
+                throw new ElasticsearchSecurityException("invalid SSL configuration for " + prefix +
+                    " - server ssl configuration requires a key and certificate, but these have not been configured; you must set either " +
+                    "[" + configurationSettings.x509KeyPair.keystorePath.getKey() + "], or both [" +
+                    configurationSettings.x509KeyPair.keyPath.getKey() + "] and [" +
+                    configurationSettings.x509KeyPair.certificatePath.getKey() + "]");
+            }
+        } else if (settings.hasValue(enabledSetting) == false) {
+            final List<String> sslSettingNames = settings.keySet().stream()
+                .filter(s -> s.startsWith(prefix))
+                .sorted()
+                .collect(Collectors.toUnmodifiableList());
+            if (sslSettingNames.isEmpty() == false) {
+                throw new ElasticsearchSecurityException("invalid configuration for " + prefix + " - [" + enabledSetting +
+                    "] is not set, but the following settings have been configured in elasticsearch.yml : [" +
+                    Strings.collectionToCommaDelimitedString(sslSettingNames) + "]");
+            }
+        }
     }
 
     private void storeSslConfiguration(String key, SSLConfiguration configuration) {
@@ -463,12 +508,15 @@ public class SSLService {
      */
     private static class SecuritySSLSocketFactory extends SSLSocketFactory {
 
-        private final SSLSocketFactory delegate;
+        private final Supplier<SSLSocketFactory> delegateSupplier;
         private final String[] supportedProtocols;
         private final String[] ciphers;
 
-        SecuritySSLSocketFactory(SSLSocketFactory delegate, String[] supportedProtocols, String[] ciphers) {
-            this.delegate = delegate;
+        private volatile SSLSocketFactory delegate;
+
+        SecuritySSLSocketFactory(Supplier<SSLSocketFactory> delegateSupplier, String[] supportedProtocols, String[] ciphers) {
+            this.delegateSupplier = delegateSupplier;
+            this.delegate = this.delegateSupplier.get();
             this.supportedProtocols = supportedProtocols;
             this.ciphers = ciphers;
         }
@@ -525,6 +573,11 @@ public class SSLService {
             return sslSocket;
         }
 
+        public void reload() {
+            final SSLSocketFactory newDelegate = delegateSupplier.get();
+            this.delegate = newDelegate;
+        }
+
         private void configureSSLSocket(SSLSocket socket) {
             SSLParameters parameters = new SSLParameters(ciphers, supportedProtocols);
             // we use the cipher suite order so that we can prefer the ciphers we set first in the list
@@ -543,12 +596,14 @@ public class SSLService {
         private final KeyConfig keyConfig;
         private final TrustConfig trustConfig;
         private final SSLConfiguration sslConfiguration;
+        private final List<Runnable> reloadListeners;
 
         SSLContextHolder(SSLContext context, SSLConfiguration sslConfiguration) {
             this.context = context;
             this.sslConfiguration = sslConfiguration;
             this.keyConfig = sslConfiguration.keyConfig();
             this.trustConfig = sslConfiguration.trustConfig();
+            this.reloadListeners = new ArrayList<>();
         }
 
         SSLContext sslContext() {
@@ -559,6 +614,7 @@ public class SSLService {
             invalidateSessions(context.getClientSessionContext());
             invalidateSessions(context.getServerSessionContext());
             reloadSslContext();
+            this.reloadListeners.forEach(Runnable::run);
         }
 
         private void reloadSslContext() {
@@ -592,6 +648,10 @@ public class SSLService {
             trustManagerFactory.init(keyStore);
             return (X509ExtendedTrustManager) trustManagerFactory.getTrustManagers()[0];
         }
+
+        public void addReloadListener(Runnable listener) {
+            this.reloadListeners.add(listener);
+        }
     }
 
     /**
@@ -602,7 +662,7 @@ public class SSLService {
         while (sessionIds.hasMoreElements()) {
             byte[] sessionId = sessionIds.nextElement();
             SSLSession session = sslSessionContext.getSession(sessionId);
-            // a SSLSession could be null as there is no lock while iterating, the session cache
+            // an SSLSession could be null as there is no lock while iterating, the session cache
             // could have evicted a value, the session could be timed out, or the session could
             // have already been invalidated, which removes the value from the session cache in the
             // sun implementation
@@ -619,12 +679,19 @@ public class SSLService {
         final Map<String, Settings> sslSettings = new HashMap<>();
         final String prefix = "xpack.security.authc.realms.";
         final Map<String, Settings> settingsByRealmType = settings.getGroups(prefix);
-        settingsByRealmType.forEach((realmType, typeSettings) ->
-            typeSettings.getAsGroups().forEach((realmName, realmSettings) -> {
-                Settings realmSSLSettings = realmSettings.getByPrefix("ssl.");
-                // Put this even if empty, so that the name will be mapped to the global SSL configuration
-                sslSettings.put(prefix + realmType + "." + realmName + ".ssl", realmSSLSettings);
-            })
+        settingsByRealmType.forEach((realmType, typeSettings) -> {
+                final Optional<String> nonDottedSetting = typeSettings.keySet().stream().filter(k -> k.indexOf('.') == -1).findAny();
+                if (nonDottedSetting.isPresent()) {
+                    logger.warn("Skipping any SSL configuration from realm [{}{}] because the key [{}] is not in the correct format",
+                        prefix, realmType, nonDottedSetting.get());
+                } else {
+                    typeSettings.getAsGroups().forEach((realmName, realmSettings) -> {
+                        Settings realmSSLSettings = realmSettings.getByPrefix("ssl.");
+                        // Put this even if empty, so that the name will be mapped to the global SSL configuration
+                        sslSettings.put(prefix + realmType + "." + realmName + ".ssl", realmSSLSettings);
+                    });
+                }
+            }
         );
         return sslSettings;
     }
@@ -682,47 +749,19 @@ public class SSLService {
     /**
      * Maps the supported protocols to an appropriate ssl context algorithm. We make an attempt to use the "best" algorithm when
      * possible. The names in this method are taken from the
-     * <a href="http://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html">JCA Standard Algorithm Name
-     * Documentation for Java 8</a>.
+     * <a href="https://docs.oracle.com/en/java/javase/11/docs/specs/security/standard-names.html#sslcontext-algorithms">Java Security
+     * Standard Algorithm Names Documentation for Java 11</a>.
      */
     private static String sslContextAlgorithm(List<String> supportedProtocols) {
         if (supportedProtocols.isEmpty()) {
-            return "TLSv1.2";
+            throw new IllegalArgumentException("no SSL/TLS protocols have been configured");
         }
-
-        String algorithm = "SSL";
-        for (String supportedProtocol : supportedProtocols) {
-            switch (supportedProtocol) {
-                case "TLSv1.2":
-                    return "TLSv1.2";
-                case "TLSv1.1":
-                    if ("TLSv1.2".equals(algorithm) == false) {
-                        algorithm = "TLSv1.1";
-                    }
-                    break;
-                case "TLSv1":
-                    switch (algorithm) {
-                        case "TLSv1.2":
-                        case "TLSv1.1":
-                            break;
-                        default:
-                            algorithm = "TLSv1";
-                    }
-                    break;
-                case "SSLv3":
-                    switch (algorithm) {
-                        case "SSLv2":
-                        case "SSL":
-                            algorithm = "SSLv3";
-                    }
-                    break;
-                case "SSLv2":
-                case "SSLv2Hello":
-                    break;
-                default:
-                    throw new IllegalArgumentException("found unexpected value in supported protocols: " + supportedProtocol);
+        for (Entry<String, String> entry : ORDERED_PROTOCOL_ALGORITHM_MAP.entrySet()) {
+            if (supportedProtocols.contains(entry.getKey())) {
+                return entry.getValue();
             }
         }
-        return algorithm;
+        throw new IllegalArgumentException("no supported SSL/TLS protocol was found in the configured supported protocols: "
+            + supportedProtocols);
     }
 }

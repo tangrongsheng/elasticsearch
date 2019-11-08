@@ -22,7 +22,6 @@ package org.elasticsearch.rest.action.search;
 import org.elasticsearch.action.explain.ExplainRequest;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
@@ -40,10 +39,10 @@ import static org.elasticsearch.rest.RestRequest.Method.POST;
  * Rest action for computing a score explanation for specific documents.
  */
 public class RestExplainAction extends BaseRestHandler {
-    public RestExplainAction(Settings settings, RestController controller) {
-        super(settings);
-        controller.registerHandler(GET, "/{index}/{type}/{id}/_explain", this);
-        controller.registerHandler(POST, "/{index}/{type}/{id}/_explain", this);
+
+    public RestExplainAction(RestController controller) {
+        controller.registerHandler(GET, "/{index}/_explain/{id}", this);
+        controller.registerHandler(POST, "/{index}/_explain/{id}", this);
     }
 
     @Override
@@ -53,7 +52,8 @@ public class RestExplainAction extends BaseRestHandler {
 
     @Override
     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
-        final ExplainRequest explainRequest = new ExplainRequest(request.param("index"), request.param("type"), request.param("id"));
+        ExplainRequest explainRequest = new ExplainRequest(request.param("index"), request.param("id"));
+
         explainRequest.parent(request.param("parent"));
         explainRequest.routing(request.param("routing"));
         explainRequest.preference(request.param("preference"));

@@ -21,18 +21,23 @@ package org.elasticsearch.search.aggregations.support;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.geo.GeoPoint;
-import org.elasticsearch.common.joda.Joda;
+import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.fielddata.IndexGeoPointFieldData;
 import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.fielddata.IndexOrdinalsFieldData;
+import org.elasticsearch.index.mapper.DateFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
+import org.elasticsearch.index.mapper.RangeFieldMapper;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.script.AggregationScript;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.AggregationExecutionException;
-import org.joda.time.DateTimeZone;
+
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.function.Function;
 
 /**
  * A configuration that tells aggregations how to retrieve data from the index
@@ -44,12 +49,27 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
      * Resolve a {@link ValuesSourceConfig} given configuration parameters.
      */
     public static <VS extends ValuesSource> ValuesSourceConfig<VS> resolve(
-            QueryShardContext context,
-            ValueType valueType,
-            String field, Script script,
-            Object missing,
-            DateTimeZone timeZone,
-            String format) {
+        QueryShardContext context,
+        ValueType valueType,
+        String field, Script script,
+        Object missing,
+        ZoneId timeZone,
+        String format) {
+        return resolve(context, valueType, field, script, missing, timeZone, format, s -> ValuesSourceType.BYTES);
+    }
+
+    /**
+     * Resolve a {@link ValuesSourceConfig} given configuration parameters.
+     */
+    public static <VS extends ValuesSource> ValuesSourceConfig<VS> resolve(
+        QueryShardContext context,
+        ValueType valueType,
+        String field, Script script,
+        Object missing,
+        ZoneId timeZone,
+        String format,
+        Function<Script, ValuesSourceType> resolveScriptAny
+    ) {
 
         if (field == null) {
             if (script == null) {
@@ -63,7 +83,7 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
                 // we need to have a specific value source
                 // type to know how to handle the script values, so we fallback
                 // on Bytes
-                valuesSourceType = ValuesSourceType.BYTES;
+                valuesSourceType = resolveScriptAny.apply(script);
             }
             ValuesSourceConfig<VS> config = new ValuesSourceConfig<>(valuesSourceType);
             config.missing(missing);
@@ -92,17 +112,20 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         IndexFieldData<?> indexFieldData = context.getForField(fieldType);
 
         ValuesSourceConfig<VS> config;
-        if (valueType == null) {
-            if (indexFieldData instanceof IndexNumericFieldData) {
-                config = new ValuesSourceConfig<>(ValuesSourceType.NUMERIC);
-            } else if (indexFieldData instanceof IndexGeoPointFieldData) {
-                config = new ValuesSourceConfig<>(ValuesSourceType.GEOPOINT);
-            } else {
-                config = new ValuesSourceConfig<>(ValuesSourceType.BYTES);
-            }
+        if (indexFieldData instanceof IndexNumericFieldData) {
+            config = new ValuesSourceConfig<>(ValuesSourceType.NUMERIC);
+        } else if (indexFieldData instanceof IndexGeoPointFieldData) {
+            config = new ValuesSourceConfig<>(ValuesSourceType.GEOPOINT);
+        } else if (fieldType instanceof RangeFieldMapper.RangeFieldType) {
+            config = new ValuesSourceConfig<>(ValuesSourceType.RANGE);
         } else {
-            config = new ValuesSourceConfig<>(valueType.getValuesSourceType());
+            if (valueType == null) {
+                config = new ValuesSourceConfig<>(ValuesSourceType.BYTES);
+            } else {
+                config = new ValuesSourceConfig<>(valueType.getValuesSourceType());
+            }
         }
+
 
         config.fieldContext(new FieldContext(field, indexFieldData, fieldType));
         config.missing(missing);
@@ -121,7 +144,7 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         }
     }
 
-    private static DocValueFormat resolveFormat(@Nullable String format, @Nullable ValueType valueType, @Nullable DateTimeZone tz) {
+    private static DocValueFormat resolveFormat(@Nullable String format, @Nullable ValueType valueType, @Nullable ZoneId tz) {
         if (valueType == null) {
             return DocValueFormat.RAW; // we can't figure it out
         }
@@ -130,7 +153,8 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
             valueFormat = new DocValueFormat.Decimal(format);
         }
         if (valueFormat instanceof DocValueFormat.DateTime && format != null) {
-            valueFormat = new DocValueFormat.DateTime(Joda.forPattern(format), tz != null ? tz : DateTimeZone.UTC);
+            valueFormat = new DocValueFormat.DateTime(DateFormatter.forPattern(format), tz != null ? tz : ZoneOffset.UTC,
+                DateFieldMapper.Resolution.MILLISECONDS);
         }
         return valueFormat;
     }
@@ -142,7 +166,7 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
     private boolean unmapped = false;
     private DocValueFormat format = DocValueFormat.RAW;
     private Object missing;
-    private DateTimeZone timeZone;
+    private ZoneId timeZone;
 
     public ValuesSourceConfig(ValuesSourceType valueSourceType) {
         this.valueSourceType = valueSourceType;
@@ -206,12 +230,12 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         return this.missing;
     }
 
-    public ValuesSourceConfig<VS> timezone(final DateTimeZone timeZone) {
-        this.timeZone= timeZone;
+    public ValuesSourceConfig<VS> timezone(final ZoneId timeZone) {
+        this.timeZone = timeZone;
         return this;
     }
 
-    public DateTimeZone timezone() {
+    public ZoneId timezone() {
         return this.timeZone;
     }
 
@@ -219,10 +243,15 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         return format;
     }
 
+    @Nullable
+    public VS toValuesSource(QueryShardContext context) {
+        return toValuesSource(context, value -> ValuesSource.Bytes.WithOrdinals.EMPTY);
+    }
+
     /** Get a value source given its configuration. A return value of null indicates that
      *  no value source could be built. */
     @Nullable
-    public VS toValuesSource(QueryShardContext context) {
+    public VS toValuesSource(QueryShardContext context, Function<Object, ValuesSource> resolveMissingAny) {
         if (!valid()) {
             throw new IllegalStateException(
                     "value source config is invalid; must have either a field context or a script or marked as unwrapped");
@@ -237,8 +266,10 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
                 vs = (VS) ValuesSource.Numeric.EMPTY;
             } else if (valueSourceType() == ValuesSourceType.GEOPOINT) {
                 vs = (VS) ValuesSource.GeoPoint.EMPTY;
-            } else if (valueSourceType() == ValuesSourceType.ANY || valueSourceType() == ValuesSourceType.BYTES) {
+            } else if (valueSourceType() == ValuesSourceType.BYTES) {
                 vs = (VS) ValuesSource.Bytes.WithOrdinals.EMPTY;
+            } else if (valueSourceType() == ValuesSourceType.ANY) {
+                vs = (VS) resolveMissingAny.apply(missing());
             } else {
                 throw new IllegalArgumentException("Can't deal with unmapped ValuesSource type " + valueSourceType());
             }
@@ -291,6 +322,9 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         if (valueSourceType() == ValuesSourceType.GEOPOINT) {
             return (VS) geoPointField();
         }
+        if (valueSourceType() == ValuesSourceType.RANGE) {
+            return (VS) rangeField();
+        }
         // falling back to bytes values
         return (VS) bytesField();
     }
@@ -339,5 +373,15 @@ public class ValuesSourceConfig<VS extends ValuesSource> {
         }
 
         return new ValuesSource.GeoPoint.Fielddata((IndexGeoPointFieldData) fieldContext().indexFieldData());
+    }
+
+    private ValuesSource rangeField() {
+        MappedFieldType fieldType = fieldContext.fieldType();
+
+        if (fieldType instanceof RangeFieldMapper.RangeFieldType == false) {
+            throw new IllegalStateException("Asked for range ValuesSource, but field is of type " + fieldType.name());
+        }
+        RangeFieldMapper.RangeFieldType rangeFieldType = (RangeFieldMapper.RangeFieldType)fieldType;
+        return new ValuesSource.Range(fieldContext().indexFieldData(), rangeFieldType.rangeType());
     }
 }

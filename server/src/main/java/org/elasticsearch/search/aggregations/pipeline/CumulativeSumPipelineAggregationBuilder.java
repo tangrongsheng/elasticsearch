@@ -28,8 +28,6 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregatorFactory;
 import org.elasticsearch.search.aggregations.PipelineAggregationBuilder;
-import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramAggregatorFactory;
-import org.elasticsearch.search.aggregations.bucket.histogram.HistogramAggregatorFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -90,33 +88,19 @@ public class CumulativeSumPipelineAggregationBuilder extends AbstractPipelineAgg
     }
 
     @Override
-    protected PipelineAggregator createInternal(Map<String, Object> metaData) throws IOException {
+    protected PipelineAggregator createInternal(Map<String, Object> metaData) {
         return new CumulativeSumPipelineAggregator(name, bucketsPaths, formatter(), metaData);
     }
 
     @Override
-    public void doValidate(AggregatorFactory<?> parent, Collection<AggregationBuilder> aggFactories,
+    public void doValidate(AggregatorFactory parent, Collection<AggregationBuilder> aggFactories,
             Collection<PipelineAggregationBuilder> pipelineAggregatorFactories) {
         if (bucketsPaths.length != 1) {
             throw new IllegalStateException(BUCKETS_PATH.getPreferredName()
                     + " must contain a single entry for aggregation [" + name + "]");
         }
-        if (parent instanceof HistogramAggregatorFactory) {
-            HistogramAggregatorFactory histoParent = (HistogramAggregatorFactory) parent;
-            if (histoParent.minDocCount() != 0) {
-                throw new IllegalStateException("parent histogram of cumulative sum aggregation [" + name
-                        + "] must have min_doc_count of 0");
-            }
-        } else if (parent instanceof DateHistogramAggregatorFactory) {
-            DateHistogramAggregatorFactory histoParent = (DateHistogramAggregatorFactory) parent;
-            if (histoParent.minDocCount() != 0) {
-                throw new IllegalStateException("parent histogram of cumulative sum aggregation [" + name
-                        + "] must have min_doc_count of 0");
-            }
-        } else {
-            throw new IllegalStateException("cumulative sum aggregation [" + name
-                    + "] must have a histogram or date_histogram as parent");
-        }
+        
+        validateSequentiallyOrderedParentAggs(parent, NAME, name);
     }
 
     @Override
@@ -178,12 +162,15 @@ public class CumulativeSumPipelineAggregationBuilder extends AbstractPipelineAgg
     }
 
     @Override
-    protected int doHashCode() {
-        return Objects.hash(format);
+    public int hashCode() {
+        return Objects.hash(super.hashCode(), format);
     }
 
     @Override
-    protected boolean doEquals(Object obj) {
+    public boolean equals(Object obj) {
+        if (this == obj) return true;
+        if (obj == null || getClass() != obj.getClass()) return false;
+        if (super.equals(obj) == false) return false;
         CumulativeSumPipelineAggregationBuilder other = (CumulativeSumPipelineAggregationBuilder) obj;
         return Objects.equals(format, other.format);
     }

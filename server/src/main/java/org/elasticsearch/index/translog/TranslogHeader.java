@@ -30,6 +30,7 @@ import org.elasticsearch.common.io.Channels;
 import org.elasticsearch.common.io.stream.InputStreamStreamInput;
 import org.elasticsearch.common.io.stream.OutputStreamStreamOutput;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
@@ -44,8 +45,6 @@ final class TranslogHeader {
     public static final int VERSION_CHECKPOINTS  = 2; // added checkpoints
     public static final int VERSION_PRIMARY_TERM = 3; // added primary term
     public static final int CURRENT_VERSION = VERSION_PRIMARY_TERM;
-
-    public static final long UNKNOWN_PRIMARY_TERM = 0L;
 
     private final String translogUUID;
     private final long primaryTerm;
@@ -108,56 +107,57 @@ final class TranslogHeader {
      * Read a translog header from the given path and file channel
      */
     static TranslogHeader read(final String translogUUID, final Path path, final FileChannel channel) throws IOException {
-        // This input is intentionally not closed because closing it will close the FileChannel.
-        final BufferedChecksumStreamInput in =
-            new BufferedChecksumStreamInput(
+        try {
+            // This input is intentionally not closed because closing it will close the FileChannel.
+            final BufferedChecksumStreamInput in =
+                new BufferedChecksumStreamInput(
                     new InputStreamStreamInput(java.nio.channels.Channels.newInputStream(channel), channel.size()),
                     path.toString());
-        final int version;
-        try {
-            version = CodecUtil.checkHeader(new InputStreamDataInput(in), TRANSLOG_CODEC, VERSION_CHECKSUMS, VERSION_PRIMARY_TERM);
-        } catch (CorruptIndexException | IndexFormatTooOldException | IndexFormatTooNewException e) {
-            tryReportOldVersionError(path, channel);
-            throw new TranslogCorruptedException(path.toString(), "translog header corrupted", e);
-        }
-        if (version == VERSION_CHECKSUMS) {
-            throw new IllegalStateException("pre-2.0 translog found [" + path + "]");
-        }
-        // Read the translogUUID
-        final int uuidLen = in.readInt();
-        if (uuidLen > channel.size()) {
-            throw new TranslogCorruptedException(
-                    path.toString(),
-                    "UUID length can't be larger than the translog");
-        }
-        final BytesRef uuid = new BytesRef(uuidLen);
-        uuid.length = uuidLen;
-        in.read(uuid.bytes, uuid.offset, uuid.length);
-        final BytesRef expectedUUID = new BytesRef(translogUUID);
-        if (uuid.bytesEquals(expectedUUID) == false) {
-            throw new TranslogCorruptedException(
+            final int version;
+            try {
+                version = CodecUtil.checkHeader(new InputStreamDataInput(in), TRANSLOG_CODEC, VERSION_CHECKSUMS, VERSION_PRIMARY_TERM);
+            } catch (CorruptIndexException | IndexFormatTooOldException | IndexFormatTooNewException e) {
+                tryReportOldVersionError(path, channel);
+                throw new TranslogCorruptedException(path.toString(), "translog header corrupted", e);
+            }
+            if (version == VERSION_CHECKSUMS) {
+                throw new IllegalStateException("pre-2.0 translog found [" + path + "]");
+            }
+            if (version == VERSION_CHECKPOINTS) {
+                throw new IllegalStateException("pre-6.3 translog found [" + path + "]");
+            }
+            // Read the translogUUID
+            final int uuidLen = in.readInt();
+            if (uuidLen > channel.size()) {
+                throw new TranslogCorruptedException(path.toString(), "UUID length can't be larger than the translog");
+            }
+            if (uuidLen <= 0) {
+                throw new TranslogCorruptedException(path.toString(), "UUID length must be positive");
+            }
+            final BytesRef uuid = new BytesRef(uuidLen);
+            uuid.length = uuidLen;
+            in.read(uuid.bytes, uuid.offset, uuid.length);
+            final BytesRef expectedUUID = new BytesRef(translogUUID);
+            if (uuid.bytesEquals(expectedUUID) == false) {
+                throw new TranslogCorruptedException(
                     path.toString(),
                     "expected shard UUID " + expectedUUID + " but got: " + uuid +
-                            " this translog file belongs to a different translog");
-        }
-        // Read the primary term
-        final long primaryTerm;
-        if (version == VERSION_PRIMARY_TERM) {
-            primaryTerm = in.readLong();
-        } else {
-            assert version == VERSION_CHECKPOINTS : "Unknown header version [" + version + "]";
-            primaryTerm = UNKNOWN_PRIMARY_TERM;
-        }
-        // Verify the checksum
-        if (version >= VERSION_PRIMARY_TERM) {
+                        " this translog file belongs to a different translog");
+            }
+            // Read the primary term
+            assert version == VERSION_PRIMARY_TERM;
+            final long primaryTerm = in.readLong();
+            // Verify the checksum
             Translog.verifyChecksum(in);
-        }
-        assert primaryTerm >= 0 : "Primary term must be non-negative [" + primaryTerm + "]; translog path [" + path + "]";
+            assert primaryTerm >= 0 : "Primary term must be non-negative [" + primaryTerm + "]; translog path [" + path + "]";
 
-        final int headerSizeInBytes = headerSizeInBytes(version, uuid.length);
-        assert channel.position() == headerSizeInBytes :
-            "Header is not fully read; header size [" + headerSizeInBytes + "], position [" + channel.position() + "]";
-        return new TranslogHeader(translogUUID, primaryTerm, headerSizeInBytes);
+            final int headerSizeInBytes = headerSizeInBytes(version, uuid.length);
+            assert channel.position() == headerSizeInBytes :
+                "Header is not fully read; header size [" + headerSizeInBytes + "], position [" + channel.position() + "]";
+            return new TranslogHeader(translogUUID, primaryTerm, headerSizeInBytes);
+        } catch (EOFException e) {
+            throw new TranslogCorruptedException(path.toString(), "translog header truncated", e);
+        }
     }
 
     private static void tryReportOldVersionError(final Path path, final FileChannel channel) throws IOException {

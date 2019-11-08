@@ -5,14 +5,49 @@
  */
 package org.elasticsearch.xpack.core.ml.job.persistence;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.Version;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.admin.indices.mapping.put.PutMappingAction;
+import org.elasticsearch.action.admin.indices.mapping.put.PutMappingRequest;
+import org.elasticsearch.client.Client;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.AliasOrIndex;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
+import org.elasticsearch.cluster.metadata.MappingMetaData;
+import org.elasticsearch.common.CheckedFunction;
+import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.index.Index;
+import org.elasticsearch.plugins.MapperPlugin;
+import org.elasticsearch.xpack.core.ml.datafeed.ChunkingConfig;
+import org.elasticsearch.xpack.core.ml.datafeed.DatafeedConfig;
+import org.elasticsearch.xpack.core.ml.datafeed.DatafeedTimingStats;
+import org.elasticsearch.xpack.core.ml.datafeed.DelayedDataCheckConfig;
+import org.elasticsearch.xpack.core.ml.dataframe.DataFrameAnalyticsConfig;
+import org.elasticsearch.xpack.core.ml.dataframe.DataFrameAnalyticsDest;
+import org.elasticsearch.xpack.core.ml.dataframe.DataFrameAnalyticsSource;
+import org.elasticsearch.xpack.core.ml.dataframe.analyses.BoostedTreeParams;
+import org.elasticsearch.xpack.core.ml.dataframe.analyses.Classification;
+import org.elasticsearch.xpack.core.ml.dataframe.analyses.OutlierDetection;
+import org.elasticsearch.xpack.core.ml.dataframe.analyses.Regression;
+import org.elasticsearch.xpack.core.ml.job.config.AnalysisConfig;
+import org.elasticsearch.xpack.core.ml.job.config.AnalysisLimits;
+import org.elasticsearch.xpack.core.ml.job.config.DataDescription;
+import org.elasticsearch.xpack.core.ml.job.config.DetectionRule;
 import org.elasticsearch.xpack.core.ml.job.config.Detector;
 import org.elasticsearch.xpack.core.ml.job.config.Job;
+import org.elasticsearch.xpack.core.ml.job.config.ModelPlotConfig;
+import org.elasticsearch.xpack.core.ml.job.config.Operator;
+import org.elasticsearch.xpack.core.ml.job.config.RuleCondition;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.DataCounts;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.ModelSizeStats;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.ModelSnapshot;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.ModelSnapshotField;
+import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.TimingStats;
 import org.elasticsearch.xpack.core.ml.job.results.AnomalyCause;
 import org.elasticsearch.xpack.core.ml.job.results.AnomalyRecord;
 import org.elasticsearch.xpack.core.ml.job.results.Bucket;
@@ -25,17 +60,25 @@ import org.elasticsearch.xpack.core.ml.job.results.Influencer;
 import org.elasticsearch.xpack.core.ml.job.results.ModelPlot;
 import org.elasticsearch.xpack.core.ml.job.results.ReservedFieldNames;
 import org.elasticsearch.xpack.core.ml.job.results.Result;
-import org.elasticsearch.xpack.core.ml.notifications.AuditMessage;
+import org.elasticsearch.xpack.core.ml.notifications.AnomalyDetectionAuditMessage;
+import org.elasticsearch.xpack.core.ml.utils.ExponentialAverageCalculationContext;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
+import static org.elasticsearch.index.mapper.MapperService.SINGLE_MAPPING_NAME;
+import static org.elasticsearch.xpack.core.ClientHelper.ML_ORIGIN;
+import static org.elasticsearch.xpack.core.ClientHelper.executeAsyncWithOrigin;
 
 /**
- * Static methods to create Elasticsearch mappings for the autodetect
- * persisted objects/documents
+ * Static methods to create Elasticsearch index mappings for the autodetect
+ * persisted objects/documents and configurations
  * <p>
  * ElasticSearch automatically recognises array types so they are
  * not explicitly mapped as such. For arrays of objects the type
@@ -53,8 +96,6 @@ import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
  * using whitespace.
  */
 public class ElasticsearchMappings {
-
-    public static final String DOC_TYPE = "doc";
 
     /**
      * String constants used in mappings
@@ -80,6 +121,11 @@ public class ElasticsearchMappings {
     public static final String ES_DOC = "_doc";
 
     /**
+     * The configuration document type
+     */
+    public static final String CONFIG_TYPE = "config_type";
+
+    /**
      * Elasticsearch data types
      */
     public static final String BOOLEAN = "boolean";
@@ -92,7 +138,379 @@ public class ElasticsearchMappings {
 
     static final String RAW = "raw";
 
+    private static final Logger logger = LogManager.getLogger(ElasticsearchMappings.class);
+
     private ElasticsearchMappings() {
+    }
+
+    public static XContentBuilder configMapping() throws IOException {
+        return configMapping(SINGLE_MAPPING_NAME);
+    }
+
+    public static XContentBuilder configMapping(String mappingType) throws IOException {
+        XContentBuilder builder = jsonBuilder();
+        builder.startObject();
+        builder.startObject(mappingType);
+        addMetaInformation(builder);
+        addDefaultMapping(builder);
+        builder.startObject(PROPERTIES);
+
+        addJobConfigFields(builder);
+        addDatafeedConfigFields(builder);
+        addDataFrameAnalyticsFields(builder);
+
+        builder.endObject()
+               .endObject()
+               .endObject();
+        return builder;
+    }
+
+    public static void addJobConfigFields(XContentBuilder builder) throws IOException {
+
+        builder.startObject(CONFIG_TYPE)
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.ID.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.JOB_TYPE.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.JOB_VERSION.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.GROUPS.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.ANALYSIS_CONFIG.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(AnalysisConfig.BUCKET_SPAN.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.CATEGORIZATION_FIELD_NAME.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.CATEGORIZATION_FILTERS.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.CATEGORIZATION_ANALYZER.getPreferredName())
+                    .field(ENABLED, false)
+                .endObject()
+                .startObject(AnalysisConfig.LATENCY.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.SUMMARY_COUNT_FIELD_NAME.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.DETECTORS.getPreferredName())
+                    .startObject(PROPERTIES)
+                        .startObject(Detector.DETECTOR_DESCRIPTION_FIELD.getPreferredName())
+                            .field(TYPE, TEXT)
+                        .endObject()
+                        .startObject(Detector.FUNCTION_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.FIELD_NAME_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.BY_FIELD_NAME_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.OVER_FIELD_NAME_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.PARTITION_FIELD_NAME_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.USE_NULL_FIELD.getPreferredName())
+                            .field(TYPE, BOOLEAN)
+                        .endObject()
+                        .startObject(Detector.EXCLUDE_FREQUENT_FIELD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Detector.CUSTOM_RULES_FIELD.getPreferredName())
+                            .field(TYPE, NESTED)
+                            .startObject(PROPERTIES)
+                                .startObject(DetectionRule.ACTIONS_FIELD.getPreferredName())
+                                    .field(TYPE, KEYWORD)
+                                .endObject()
+                                // RuleScope is a map
+                                .startObject(DetectionRule.SCOPE_FIELD.getPreferredName())
+                                    .field(ENABLED, false)
+                                .endObject()
+                                .startObject(DetectionRule.CONDITIONS_FIELD.getPreferredName())
+                                    .field(TYPE, NESTED)
+                                    .startObject(PROPERTIES)
+                                        .startObject(RuleCondition.APPLIES_TO_FIELD.getPreferredName())
+                                            .field(TYPE, KEYWORD)
+                                        .endObject()
+                                        .startObject(Operator.OPERATOR_FIELD.getPreferredName())
+                                            .field(TYPE, KEYWORD)
+                                        .endObject()
+                                        .startObject(RuleCondition.VALUE_FIELD.getPreferredName())
+                                            .field(TYPE, DOUBLE)
+                                        .endObject()
+                                    .endObject()
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                        .startObject(Detector.DETECTOR_INDEX.getPreferredName())
+                            .field(TYPE, INTEGER)
+                        .endObject()
+                    .endObject()
+                .endObject()
+
+                .startObject(AnalysisConfig.INFLUENCERS.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnalysisConfig.MULTIVARIATE_BY_FIELDS.getPreferredName())
+                    .field(TYPE, BOOLEAN)
+                .endObject()
+            .endObject()
+        .endObject()
+
+        .startObject(Job.ANALYSIS_LIMITS.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(AnalysisLimits.MODEL_MEMORY_LIMIT.getPreferredName())
+                    .field(TYPE, KEYWORD)  // TODO Should be a ByteSizeValue
+                .endObject()
+                .startObject(AnalysisLimits.CATEGORIZATION_EXAMPLES_LIMIT.getPreferredName())
+                    .field(TYPE, LONG)
+                .endObject()
+            .endObject()
+        .endObject()
+
+        .startObject(Job.CREATE_TIME.getPreferredName())
+            .field(TYPE, DATE)
+        .endObject()
+
+        .startObject(Job.CUSTOM_SETTINGS.getPreferredName())
+            // Custom settings are an untyped map
+            .field(ENABLED, false)
+        .endObject()
+
+        .startObject(Job.DATA_DESCRIPTION.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(DataDescription.FORMAT_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataDescription.TIME_FIELD_NAME_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataDescription.TIME_FORMAT_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataDescription.FIELD_DELIMITER_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataDescription.QUOTE_CHARACTER_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+            .endObject()
+        .endObject()
+
+        .startObject(Job.DESCRIPTION.getPreferredName())
+            .field(TYPE, TEXT)
+        .endObject()
+        .startObject(Job.FINISHED_TIME.getPreferredName())
+            .field(TYPE, DATE)
+        .endObject()
+
+        .startObject(Job.MODEL_PLOT_CONFIG.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(ModelPlotConfig.ENABLED_FIELD.getPreferredName())
+                    .field(TYPE, BOOLEAN)
+                .endObject()
+                .startObject(ModelPlotConfig.TERMS_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+            .endObject()
+        .endObject()
+
+        .startObject(Job.RENORMALIZATION_WINDOW_DAYS.getPreferredName())
+            .field(TYPE, LONG) // TODO should be TimeValue
+        .endObject()
+        .startObject(Job.BACKGROUND_PERSIST_INTERVAL.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.MODEL_SNAPSHOT_RETENTION_DAYS.getPreferredName())
+            .field(TYPE, LONG) // TODO should be TimeValue
+        .endObject()
+        .startObject(Job.RESULTS_RETENTION_DAYS.getPreferredName())
+            .field(TYPE, LONG)  // TODO should be TimeValue
+        .endObject()
+        .startObject(Job.MODEL_SNAPSHOT_ID.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.MODEL_SNAPSHOT_MIN_VERSION.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(Job.RESULTS_INDEX_NAME.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject();
+    }
+
+    public static void addDatafeedConfigFields(XContentBuilder builder) throws IOException {
+        builder.startObject(DatafeedConfig.ID.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(DatafeedConfig.QUERY_DELAY.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(DatafeedConfig.FREQUENCY.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(DatafeedConfig.INDICES.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(DatafeedConfig.QUERY.getPreferredName())
+            .field(ENABLED, false)
+        .endObject()
+        .startObject(DatafeedConfig.SCROLL_SIZE.getPreferredName())
+            .field(TYPE, LONG)
+        .endObject()
+        .startObject(DatafeedConfig.AGGREGATIONS.getPreferredName())
+            .field(ENABLED, false)
+        .endObject()
+        .startObject(DatafeedConfig.SCRIPT_FIELDS.getPreferredName())
+            .field(ENABLED, false)
+        .endObject()
+        .startObject(DatafeedConfig.CHUNKING_CONFIG.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(ChunkingConfig.MODE_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(ChunkingConfig.TIME_SPAN_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+            .endObject()
+        .endObject()
+        .startObject(DatafeedConfig.DELAYED_DATA_CHECK_CONFIG.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(DelayedDataCheckConfig.ENABLED.getPreferredName())
+                    .field(TYPE, BOOLEAN)
+                .endObject()
+                .startObject(DelayedDataCheckConfig.CHECK_WINDOW.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+            .endObject()
+        .endObject()
+        .startObject(DatafeedConfig.HEADERS.getPreferredName())
+            .field(ENABLED, false)
+        .endObject();
+    }
+
+    /**
+     * {@link DataFrameAnalyticsConfig} mapping.
+     * Does not include mapping for CREATE_TIME as this mapping is added by {@link #addJobConfigFields} method.
+     */
+    public static void addDataFrameAnalyticsFields(XContentBuilder builder) throws IOException {
+        builder.startObject(DataFrameAnalyticsConfig.ID.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject()
+        .startObject(DataFrameAnalyticsConfig.SOURCE.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(DataFrameAnalyticsSource.INDEX.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataFrameAnalyticsSource.QUERY.getPreferredName())
+                    .field(ENABLED, false)
+                .endObject()
+            .endObject()
+        .endObject()
+        .startObject(DataFrameAnalyticsConfig.DEST.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(DataFrameAnalyticsDest.INDEX.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(DataFrameAnalyticsDest.RESULTS_FIELD.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+            .endObject()
+        .endObject()
+        .startObject(DataFrameAnalyticsConfig.ANALYZED_FIELDS.getPreferredName())
+            .field(ENABLED, false)
+        .endObject()
+        .startObject(DataFrameAnalyticsConfig.ANALYSIS.getPreferredName())
+            .startObject(PROPERTIES)
+                .startObject(OutlierDetection.NAME.getPreferredName())
+                    .startObject(PROPERTIES)
+                        .startObject(OutlierDetection.N_NEIGHBORS.getPreferredName())
+                            .field(TYPE, INTEGER)
+                        .endObject()
+                        .startObject(OutlierDetection.METHOD.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(OutlierDetection.FEATURE_INFLUENCE_THRESHOLD.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                    .endObject()
+                .endObject()
+                .startObject(Regression.NAME.getPreferredName())
+                    .startObject(PROPERTIES)
+                        .startObject(Regression.DEPENDENT_VARIABLE.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(BoostedTreeParams.LAMBDA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.GAMMA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.ETA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.MAXIMUM_NUMBER_TREES.getPreferredName())
+                            .field(TYPE, INTEGER)
+                        .endObject()
+                        .startObject(BoostedTreeParams.FEATURE_BAG_FRACTION.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(Regression.PREDICTION_FIELD_NAME.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Regression.TRAINING_PERCENT.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                    .endObject()
+                .endObject()
+                .startObject(Classification.NAME.getPreferredName())
+                    .startObject(PROPERTIES)
+                        .startObject(Classification.DEPENDENT_VARIABLE.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(BoostedTreeParams.LAMBDA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.GAMMA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.ETA.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(BoostedTreeParams.MAXIMUM_NUMBER_TREES.getPreferredName())
+                            .field(TYPE, INTEGER)
+                        .endObject()
+                        .startObject(BoostedTreeParams.FEATURE_BAG_FRACTION.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                        .startObject(Classification.PREDICTION_FIELD_NAME.getPreferredName())
+                            .field(TYPE, KEYWORD)
+                        .endObject()
+                        .startObject(Classification.NUM_TOP_CLASSES.getPreferredName())
+                            .field(TYPE, INTEGER)
+                        .endObject()
+                        .startObject(Classification.TRAINING_PERCENT.getPreferredName())
+                            .field(TYPE, DOUBLE)
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject()
+        .endObject()
+        // re-used: CREATE_TIME
+        .startObject(DataFrameAnalyticsConfig.VERSION.getPreferredName())
+            .field(TYPE, KEYWORD)
+        .endObject();
     }
 
     /**
@@ -129,14 +547,14 @@ public class ElasticsearchMappings {
                .endObject();
     }
 
-    public static XContentBuilder docMapping() throws IOException {
-        return docMapping(Collections.emptyList());
+    public static XContentBuilder resultsMapping(String mappingType) throws IOException {
+        return resultsMapping(mappingType, Collections.emptyList());
     }
 
-    public static XContentBuilder docMapping(Collection<String> extraTermFields) throws IOException {
+    public static XContentBuilder resultsMapping(String mappingType, Collection<String> extraTermFields) throws IOException {
         XContentBuilder builder = jsonBuilder();
         builder.startObject();
-        builder.startObject(DOC_TYPE);
+        builder.startObject(mappingType);
         addMetaInformation(builder);
         addDefaultMapping(builder);
         builder.startObject(PROPERTIES);
@@ -159,16 +577,19 @@ public class ElasticsearchMappings {
         addResultsMapping(builder);
         addCategoryDefinitionMapping(builder);
         addDataCountsMapping(builder);
+        addTimingStatsExceptBucketCountMapping(builder);
+        addDatafeedTimingStats(builder);
         addModelSnapshotMapping(builder);
 
         addTermFields(builder, extraTermFields);
 
         // end properties
         builder.endObject();
+        // end type
+        builder.endObject();
         // end mapping
         builder.endObject();
-        // end doc
-        builder.endObject();
+
 
         return builder;
     }
@@ -284,18 +705,25 @@ public class ElasticsearchMappings {
         addModelSizeStatsFieldsToMapping(builder);
     }
 
-    public static XContentBuilder termFieldsMapping(String type, Collection<String> termFields) {
+    /**
+     * Generate a keyword mapping for {@code termFields} for the default type
+     * {@link org.elasticsearch.index.mapper.MapperService#SINGLE_MAPPING_NAME}
+     *
+     * If the returned mapping is used in index creation and the new index has a matching template
+     * then the mapping type ({@link org.elasticsearch.index.mapper.MapperService#SINGLE_MAPPING_NAME})
+     * must match the mapping type of the template otherwise the mappings will not be merged correctly.
+     *
+     * @param termFields Fields to generate mapping for
+     * @return The mapping
+     */
+    public static XContentBuilder termFieldsMapping(Collection<String> termFields) {
         try {
             XContentBuilder builder = jsonBuilder().startObject();
-            if (type != null) {
-                builder.startObject(type);
-            }
+            builder.startObject(SINGLE_MAPPING_NAME);
             builder.startObject(PROPERTIES);
             addTermFields(builder, termFields);
             builder.endObject();
-            if (type != null) {
-                builder.endObject();
-            }
+            builder.endObject();
             return builder.endObject();
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -492,8 +920,6 @@ public class ElasticsearchMappings {
 
     /**
      * {@link DataCounts} mapping.
-     * The type is disabled so {@link DataCounts} aren't searchable and
-     * the '_all' field is disabled
      *
      * @throws IOException On builder write error
      */
@@ -549,6 +975,62 @@ public class ElasticsearchMappings {
     }
 
     /**
+     * {@link TimingStats} mapping.
+     * Does not include mapping for BUCKET_COUNT as this mapping is added by {@link #addDataCountsMapping} method.
+     *
+     * @throws IOException On builder write error
+     */
+    private static void addTimingStatsExceptBucketCountMapping(XContentBuilder builder) throws IOException {
+        builder
+            // re-used: BUCKET_COUNT
+            .startObject(TimingStats.MIN_BUCKET_PROCESSING_TIME_MS.getPreferredName())
+                .field(TYPE, DOUBLE)
+            .endObject()
+            .startObject(TimingStats.MAX_BUCKET_PROCESSING_TIME_MS.getPreferredName())
+                .field(TYPE, DOUBLE)
+            .endObject()
+            .startObject(TimingStats.AVG_BUCKET_PROCESSING_TIME_MS.getPreferredName())
+                .field(TYPE, DOUBLE)
+            .endObject()
+            .startObject(TimingStats.EXPONENTIAL_AVG_BUCKET_PROCESSING_TIME_MS.getPreferredName())
+                .field(TYPE, DOUBLE)
+            .endObject()
+            .startObject(TimingStats.EXPONENTIAL_AVG_CALCULATION_CONTEXT.getPreferredName())
+                .startObject(PROPERTIES)
+                    .startObject(ExponentialAverageCalculationContext.INCREMENTAL_METRIC_VALUE_MS.getPreferredName())
+                        .field(TYPE, DOUBLE)
+                    .endObject()
+                    .startObject(ExponentialAverageCalculationContext.LATEST_TIMESTAMP.getPreferredName())
+                        .field(TYPE, DATE)
+                    .endObject()
+                    .startObject(ExponentialAverageCalculationContext.PREVIOUS_EXPONENTIAL_AVERAGE_MS.getPreferredName())
+                        .field(TYPE, DOUBLE)
+                    .endObject()
+                .endObject()
+            .endObject();
+    }
+
+    /**
+     * {@link DatafeedTimingStats} mapping.
+     * Does not include mapping for BUCKET_COUNT as this mapping is added by {@link #addDataCountsMapping} method.
+     * Does not include mapping for EXPONENTIAL_AVG_CALCULATION_CONTEXT as this mapping is added by
+     *     {@link #addTimingStatsExceptBucketCountMapping} method.
+     *
+     * @throws IOException On builder write error
+     */
+    private static void addDatafeedTimingStats(XContentBuilder builder) throws IOException {
+        builder
+            .startObject(DatafeedTimingStats.SEARCH_COUNT.getPreferredName())
+                .field(TYPE, LONG)
+            .endObject()
+            // re-used: BUCKET_COUNT
+            .startObject(DatafeedTimingStats.TOTAL_SEARCH_TIME_MS.getPreferredName())
+                .field(TYPE, DOUBLE)
+            // re-used: EXPONENTIAL_AVG_CALCULATION_CONTEXT
+            .endObject();
+    }
+
+    /**
      * Create the Elasticsearch mapping for {@linkplain CategoryDefinition}.
      * The '_all' field is disabled as the document isn't meant to be searched.
      *
@@ -581,7 +1063,7 @@ public class ElasticsearchMappings {
     public static XContentBuilder stateMapping() throws IOException {
         XContentBuilder builder = jsonBuilder();
         builder.startObject();
-        builder.startObject(DOC_TYPE);
+        builder.startObject(SINGLE_MAPPING_NAME);
         addMetaInformation(builder);
         builder.field(ENABLED, false);
         builder.endObject();
@@ -628,6 +1110,8 @@ public class ElasticsearchMappings {
 
         builder.startObject(ModelSnapshot.QUANTILES.getPreferredName())
             .field(ENABLED, false)
+        .endObject().startObject(ModelSnapshot.MIN_VERSION.getPreferredName())
+            .field(TYPE, KEYWORD)
         .endObject()
         .startObject(ModelSnapshot.LATEST_RECORD_TIME.getPreferredName())
             .field(TYPE, DATE)
@@ -667,32 +1151,132 @@ public class ElasticsearchMappings {
     }
 
     public static XContentBuilder auditMessageMapping() throws IOException {
-        return jsonBuilder()
-                .startObject()
-                    .startObject(AuditMessage.TYPE.getPreferredName())
-                        .startObject(PROPERTIES)
-                            .startObject(Job.ID.getPreferredName())
-                                .field(TYPE, KEYWORD)
-                            .endObject()
-                            .startObject(AuditMessage.LEVEL.getPreferredName())
-                               .field(TYPE, KEYWORD)
-                            .endObject()
-                            .startObject(AuditMessage.MESSAGE.getPreferredName())
-                                .field(TYPE, TEXT)
-                                .startObject(FIELDS)
-                                    .startObject(RAW)
-                                        .field(TYPE, KEYWORD)
-                                    .endObject()
-                                .endObject()
-                            .endObject()
-                            .startObject(AuditMessage.TIMESTAMP.getPreferredName())
-                                .field(TYPE, DATE)
-                            .endObject()
-                            .startObject(AuditMessage.NODE_NAME.getPreferredName())
-                                .field(TYPE, KEYWORD)
-                            .endObject()
+        XContentBuilder builder = jsonBuilder().startObject();
+        builder.startObject(SINGLE_MAPPING_NAME);
+        addMetaInformation(builder);
+        builder.field(DYNAMIC, "false");
+        builder.startObject(PROPERTIES)
+                .startObject(Job.ID.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnomalyDetectionAuditMessage.LEVEL.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnomalyDetectionAuditMessage.MESSAGE.getPreferredName())
+                    .field(TYPE, TEXT)
+                    .startObject(FIELDS)
+                        .startObject(RAW)
+                            .field(TYPE, KEYWORD)
                         .endObject()
                     .endObject()
-                .endObject();
+                .endObject()
+                .startObject(AnomalyDetectionAuditMessage.TIMESTAMP.getPreferredName())
+                    .field(TYPE, DATE)
+                .endObject()
+                .startObject(AnomalyDetectionAuditMessage.NODE_NAME.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+                .startObject(AnomalyDetectionAuditMessage.JOB_TYPE.getPreferredName())
+                    .field(TYPE, KEYWORD)
+                .endObject()
+        .endObject()
+        .endObject()
+        .endObject();
+
+        return builder;
+    }
+
+    static String[] mappingRequiresUpdate(ClusterState state, String[] concreteIndices, Version minVersion) throws IOException {
+        List<String> indicesToUpdate = new ArrayList<>();
+
+        ImmutableOpenMap<String, MappingMetaData> currentMapping = state.metaData().findMappings(concreteIndices,
+                MapperPlugin.NOOP_FIELD_FILTER);
+
+        for (String index : concreteIndices) {
+            MappingMetaData metaData = currentMapping.get(index);
+            if (metaData != null) {
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> meta = (Map<String, Object>) metaData.sourceAsMap().get("_meta");
+                    if (meta != null) {
+                        String versionString = (String) meta.get("version");
+                        if (versionString == null) {
+                            logger.info("Version of mappings for [{}] not found, recreating", index);
+                            indicesToUpdate.add(index);
+                            continue;
+                        }
+
+                        Version mappingVersion = Version.fromString(versionString);
+
+                        if (mappingVersion.onOrAfter(minVersion)) {
+                            continue;
+                        } else {
+                            logger.info("Mappings for [{}] are outdated [{}], updating it[{}].", index, mappingVersion, Version.CURRENT);
+                            indicesToUpdate.add(index);
+                            continue;
+                        }
+                    } else {
+                        logger.info("Version of mappings for [{}] not found, recreating", index);
+                        indicesToUpdate.add(index);
+                        continue;
+                    }
+                } catch (Exception e) {
+                    logger.error(new ParameterizedMessage("Failed to retrieve mapping version for [{}], recreating", index), e);
+                    indicesToUpdate.add(index);
+                    continue;
+                }
+            } else {
+                logger.info("No mappings found for [{}], recreating", index);
+                indicesToUpdate.add(index);
+            }
+        }
+        return indicesToUpdate.toArray(new String[indicesToUpdate.size()]);
+    }
+
+    public static void addDocMappingIfMissing(String alias,
+                                              CheckedFunction<String, XContentBuilder, IOException> mappingSupplier,
+                                              Client client, ClusterState state, ActionListener<Boolean> listener) {
+        AliasOrIndex aliasOrIndex = state.metaData().getAliasAndIndexLookup().get(alias);
+        if (aliasOrIndex == null) {
+            // The index has never been created yet
+            listener.onResponse(true);
+            return;
+        }
+        String[] concreteIndices = aliasOrIndex.getIndices().stream().map(IndexMetaData::getIndex).map(Index::getName)
+            .toArray(String[]::new);
+
+        String[] indicesThatRequireAnUpdate;
+        try {
+            indicesThatRequireAnUpdate = mappingRequiresUpdate(state, concreteIndices, Version.CURRENT);
+        } catch (IOException e) {
+            listener.onFailure(e);
+            return;
+        }
+
+        if (indicesThatRequireAnUpdate.length > 0) {
+            // Use the mapping type of the first index in the update
+            IndexMetaData indexMetaData = state.metaData().index(indicesThatRequireAnUpdate[0]);
+            String mappingType = indexMetaData.mapping().type();
+
+            try (XContentBuilder mapping = mappingSupplier.apply(mappingType)) {
+                PutMappingRequest putMappingRequest = new PutMappingRequest(indicesThatRequireAnUpdate);
+                putMappingRequest.type(mappingType);
+                putMappingRequest.source(mapping);
+                executeAsyncWithOrigin(client, ML_ORIGIN, PutMappingAction.INSTANCE, putMappingRequest,
+                    ActionListener.wrap(response -> {
+                        if (response.isAcknowledged()) {
+                            listener.onResponse(true);
+                        } else {
+                            listener.onFailure(new ElasticsearchException("Attempt to put missing mapping in indices "
+                                + Arrays.toString(indicesThatRequireAnUpdate) + " was not acknowledged"));
+                        }
+                    }, listener::onFailure));
+            } catch (IOException e) {
+                listener.onFailure(e);
+            }
+        } else {
+            logger.trace("Mappings are up to date.");
+            listener.onResponse(true);
+        }
     }
 }

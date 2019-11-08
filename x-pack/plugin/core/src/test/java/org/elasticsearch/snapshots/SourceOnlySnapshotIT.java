@@ -16,7 +16,6 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
@@ -24,11 +23,9 @@ import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.index.IndexSettings;
-import org.elasticsearch.index.MockEngineFactoryPlugin;
 import org.elasticsearch.index.engine.EngineFactory;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.node.Node;
 import org.elasticsearch.plugins.EnginePlugin;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.plugins.RepositoryPlugin;
@@ -38,6 +35,7 @@ import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.slice.SliceBuilder;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.threadpool.ThreadPool;
 import org.hamcrest.Matchers;
 
 import java.io.IOException;
@@ -48,13 +46,13 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ExecutionException;
 import java.util.function.BiConsumer;
 
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertHitCount;
 
+@ESIntegTestCase.ClusterScope(numDataNodes = 0)
 public class SourceOnlySnapshotIT extends ESIntegTestCase {
 
     @Override
@@ -65,15 +63,14 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
     }
 
     @Override
-    protected Collection<Class<? extends Plugin>> getMockPlugins() {
-        Collection<Class<? extends Plugin>> classes = new ArrayList<>(super.getMockPlugins());
-        classes.remove(MockEngineFactoryPlugin.class);
-        return classes;
+    protected boolean addMockInternalEngine() {
+        return false;
     }
 
     public static final class MyPlugin extends Plugin implements RepositoryPlugin, EnginePlugin {
         @Override
-        public Map<String, Repository.Factory> getRepositories(Environment env, NamedXContentRegistry namedXContentRegistry) {
+        public Map<String, Repository.Factory> getRepositories(Environment env, NamedXContentRegistry namedXContentRegistry,
+                                                               ThreadPool threadPool) {
             return Collections.singletonMap("source", SourceOnlySnapshotRepository.newRepositoryFactory());
         }
         @Override
@@ -113,7 +110,7 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
         assertTrue(e.toString().contains("_source only indices can't be searched or filtered"));
         // make sure deletes do not work
         String idToDelete = "" + randomIntBetween(0, builders.length);
-        expectThrows(ClusterBlockException.class, () -> client().prepareDelete(sourceIdx, "_doc", idToDelete)
+        expectThrows(ClusterBlockException.class, () -> client().prepareDelete(sourceIdx, idToDelete)
             .setRouting("r" + idToDelete).get());
         internalCluster().ensureAtLeastNumDataNodes(2);
             client().admin().indices().prepareUpdateSettings(sourceIdx)
@@ -122,7 +119,6 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
         assertHits(sourceIdx, builders.length, sourceHadDeletions);
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/36276")
     public void testSnapshotAndRestoreWithNested() throws Exception {
         final String sourceIdx = "test-idx";
         boolean requireRouting = randomBoolean();
@@ -139,7 +135,7 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
         assertTrue(e.toString().contains("_source only indices can't be searched or filtered"));
         // make sure deletes do not work
         String idToDelete = "" + randomIntBetween(0, builders.length);
-        expectThrows(ClusterBlockException.class, () -> client().prepareDelete(sourceIdx, "_doc", idToDelete)
+        expectThrows(ClusterBlockException.class, () -> client().prepareDelete(sourceIdx, idToDelete)
             .setRouting("r" + idToDelete).get());
         internalCluster().ensureAtLeastNumDataNodes(2);
         client().admin().indices().prepareUpdateSettings(sourceIdx).setSettings(Settings.builder().put("index.number_of_replicas", 1))
@@ -150,9 +146,7 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
 
     private void assertMappings(String sourceIdx, boolean requireRouting, boolean useNested) throws IOException {
         GetMappingsResponse getMappingsResponse = client().admin().indices().prepareGetMappings(sourceIdx).get();
-        ImmutableOpenMap<String, MappingMetaData> mapping = getMappingsResponse
-            .getMappings().get(sourceIdx);
-        assertTrue(mapping.containsKey("_doc"));
+        MappingMetaData mapping = getMappingsResponse.getMappings().get(sourceIdx);
         String nested = useNested ?
             ",\"incorrect\":{\"type\":\"object\"},\"nested\":{\"type\":\"nested\",\"properties\":{\"value\":{\"type\":\"long\"}}}" : "";
         if (requireRouting) {
@@ -160,12 +154,12 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
                 "\"_meta\":{\"_doc\":{\"_routing\":{\"required\":true}," +
                 "\"properties\":{\"field1\":{\"type\":\"text\"," +
                 "\"fields\":{\"keyword\":{\"type\":\"keyword\",\"ignore_above\":256}}}" + nested +
-                "}}}}}", mapping.get("_doc").source().string());
+                "}}}}}", mapping.source().string());
         } else {
             assertEquals("{\"_doc\":{\"enabled\":false," +
                 "\"_meta\":{\"_doc\":{\"properties\":{\"field1\":{\"type\":\"text\"," +
                 "\"fields\":{\"keyword\":{\"type\":\"keyword\",\"ignore_above\":256}}}" + nested + "}}}}}",
-                mapping.get("_doc").source().string());
+                mapping.source().string());
         }
     }
 
@@ -209,12 +203,13 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
                 client().prepareClearScroll().addScrollId(searchResponse.getScrollId()).get();
             }
         }
-
     }
 
-    private IndexRequestBuilder[] snashotAndRestore(String sourceIdx, int numShards, boolean minimal, boolean requireRouting, boolean
-        useNested)
-        throws ExecutionException, InterruptedException, IOException {
+    private IndexRequestBuilder[] snashotAndRestore(final String sourceIdx,
+                                                    final int numShards,
+                                                    final boolean minimal,
+                                                    final boolean requireRouting,
+                                                    final boolean useNested) throws InterruptedException, IOException {
         logger.info("-->  starting a master node and a data node");
         internalCluster().startMasterOnlyNode();
         internalCluster().startDataOnlyNode();
@@ -260,8 +255,7 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
                 source.endArray();
             }
             source.endObject();
-            builders[i] = client().prepareIndex(sourceIdx, "_doc",
-                Integer.toString(i)).setSource(source).setRouting("r" + i);
+            builders[i] = client().prepareIndex(sourceIdx).setId(Integer.toString(i)).setSource(source).setRouting("r" + i);
         }
         indexRandom(true, builders);
         flushAndRefresh();
@@ -278,12 +272,8 @@ public class SourceOnlySnapshotIT extends ESIntegTestCase {
         internalCluster().stopRandomDataNode();
         client().admin().cluster().prepareHealth().setTimeout("30s").setWaitForNodes("1");
 
-        logger.info("--> start a new data node");
-        final Settings dataSettings = Settings.builder()
-            .put(Node.NODE_NAME_SETTING.getKey(), randomAlphaOfLength(5))
-            .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir()) // to get a new node id
-            .build();
-        internalCluster().startDataOnlyNode(dataSettings);
+        final String newDataNode = internalCluster().startDataOnlyNode();
+        logger.info("--> start a new data node " + newDataNode);
         client().admin().cluster().prepareHealth().setTimeout("30s").setWaitForNodes("2");
 
         logger.info("--> restore the index and ensure all shards are allocated");

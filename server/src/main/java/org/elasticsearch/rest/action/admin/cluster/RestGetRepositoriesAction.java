@@ -42,8 +42,7 @@ public class RestGetRepositoriesAction extends BaseRestHandler {
 
     private final SettingsFilter settingsFilter;
 
-    public RestGetRepositoriesAction(Settings settings, RestController controller, SettingsFilter settingsFilter) {
-        super(settings);
+    public RestGetRepositoriesAction(RestController controller, SettingsFilter settingsFilter) {
         controller.registerHandler(GET, "/_snapshot", this);
         controller.registerHandler(GET, "/_snapshot/{repository}", this);
         this.settingsFilter = settingsFilter;
@@ -51,7 +50,7 @@ public class RestGetRepositoriesAction extends BaseRestHandler {
 
     @Override
     public String getName() {
-        return "get_respositories_action";
+        return "get_repositories_action";
     }
 
     @Override

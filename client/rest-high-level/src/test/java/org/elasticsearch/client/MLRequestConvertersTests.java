@@ -23,16 +23,20 @@ import org.apache.http.client.methods.HttpDelete;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
+import org.elasticsearch.client.core.PageParams;
 import org.elasticsearch.client.ml.CloseJobRequest;
 import org.elasticsearch.client.ml.DeleteCalendarEventRequest;
 import org.elasticsearch.client.ml.DeleteCalendarJobRequest;
 import org.elasticsearch.client.ml.DeleteCalendarRequest;
+import org.elasticsearch.client.ml.DeleteDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.DeleteDatafeedRequest;
 import org.elasticsearch.client.ml.DeleteExpiredDataRequest;
 import org.elasticsearch.client.ml.DeleteFilterRequest;
 import org.elasticsearch.client.ml.DeleteForecastRequest;
 import org.elasticsearch.client.ml.DeleteJobRequest;
 import org.elasticsearch.client.ml.DeleteModelSnapshotRequest;
+import org.elasticsearch.client.ml.EvaluateDataFrameRequest;
+import org.elasticsearch.client.ml.EvaluateDataFrameRequestTests;
 import org.elasticsearch.client.ml.FindFileStructureRequest;
 import org.elasticsearch.client.ml.FindFileStructureRequestTests;
 import org.elasticsearch.client.ml.FlushJobRequest;
@@ -41,6 +45,8 @@ import org.elasticsearch.client.ml.GetBucketsRequest;
 import org.elasticsearch.client.ml.GetCalendarEventsRequest;
 import org.elasticsearch.client.ml.GetCalendarsRequest;
 import org.elasticsearch.client.ml.GetCategoriesRequest;
+import org.elasticsearch.client.ml.GetDataFrameAnalyticsRequest;
+import org.elasticsearch.client.ml.GetDataFrameAnalyticsStatsRequest;
 import org.elasticsearch.client.ml.GetDatafeedRequest;
 import org.elasticsearch.client.ml.GetDatafeedStatsRequest;
 import org.elasticsearch.client.ml.GetFiltersRequest;
@@ -57,12 +63,16 @@ import org.elasticsearch.client.ml.PostDataRequest;
 import org.elasticsearch.client.ml.PreviewDatafeedRequest;
 import org.elasticsearch.client.ml.PutCalendarJobRequest;
 import org.elasticsearch.client.ml.PutCalendarRequest;
+import org.elasticsearch.client.ml.PutDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.PutDatafeedRequest;
 import org.elasticsearch.client.ml.PutFilterRequest;
 import org.elasticsearch.client.ml.PutJobRequest;
 import org.elasticsearch.client.ml.RevertModelSnapshotRequest;
+import org.elasticsearch.client.ml.SetUpgradeModeRequest;
+import org.elasticsearch.client.ml.StartDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.StartDatafeedRequest;
 import org.elasticsearch.client.ml.StartDatafeedRequestTests;
+import org.elasticsearch.client.ml.StopDataFrameAnalyticsRequest;
 import org.elasticsearch.client.ml.StopDatafeedRequest;
 import org.elasticsearch.client.ml.UpdateFilterRequest;
 import org.elasticsearch.client.ml.UpdateJobRequest;
@@ -73,6 +83,9 @@ import org.elasticsearch.client.ml.calendars.ScheduledEvent;
 import org.elasticsearch.client.ml.calendars.ScheduledEventTests;
 import org.elasticsearch.client.ml.datafeed.DatafeedConfig;
 import org.elasticsearch.client.ml.datafeed.DatafeedConfigTests;
+import org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsConfig;
+import org.elasticsearch.client.ml.dataframe.MlDataFrameAnalysisNamedXContentProvider;
+import org.elasticsearch.client.ml.dataframe.evaluation.MlEvaluationNamedXContentProvider;
 import org.elasticsearch.client.ml.filestructurefinder.FileStructure;
 import org.elasticsearch.client.ml.job.config.AnalysisConfig;
 import org.elasticsearch.client.ml.job.config.Detector;
@@ -81,25 +94,31 @@ import org.elasticsearch.client.ml.job.config.JobUpdate;
 import org.elasticsearch.client.ml.job.config.JobUpdateTests;
 import org.elasticsearch.client.ml.job.config.MlFilter;
 import org.elasticsearch.client.ml.job.config.MlFilterTests;
-import org.elasticsearch.client.ml.job.util.PageParams;
 import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
+import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.test.ESTestCase;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.elasticsearch.client.ml.dataframe.DataFrameAnalyticsConfigTests.randomDataFrameAnalyticsConfig;
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasEntry;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.core.IsNull.nullValue;
 
@@ -112,7 +131,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.putJob(putJobRequest);
 
         assertEquals(HttpPut.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/anomaly_detectors/foo"));
+        assertThat(request.getEndpoint(), equalTo("/_ml/anomaly_detectors/foo"));
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             Job parsedJob = Job.PARSER.apply(parser, null).build();
             assertThat(parsedJob, equalTo(job));
@@ -125,14 +144,14 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.getJob(getJobRequest);
 
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors", request.getEndpoint());
         assertFalse(request.getParameters().containsKey("allow_no_jobs"));
 
         getJobRequest = new GetJobRequest("job1", "jobs*");
         getJobRequest.setAllowNoJobs(true);
         request = MLRequestConverters.getJob(getJobRequest);
 
-        assertEquals("/_xpack/ml/anomaly_detectors/job1,jobs*", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/job1,jobs*", request.getEndpoint());
         assertEquals(Boolean.toString(true), request.getParameters().get("allow_no_jobs"));
     }
 
@@ -142,17 +161,16 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.getJobStats(getJobStatsRequestRequest);
 
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/_stats", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/_stats", request.getEndpoint());
         assertFalse(request.getParameters().containsKey("allow_no_jobs"));
 
         getJobStatsRequestRequest = new GetJobStatsRequest("job1", "jobs*");
         getJobStatsRequestRequest.setAllowNoJobs(true);
         request = MLRequestConverters.getJobStats(getJobStatsRequestRequest);
 
-        assertEquals("/_xpack/ml/anomaly_detectors/job1,jobs*/_stats", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/job1,jobs*/_stats", request.getEndpoint());
         assertEquals(Boolean.toString(true), request.getParameters().get("allow_no_jobs"));
     }
-
 
     public void testOpenJob() throws Exception {
         String jobId = "some-job-id";
@@ -161,7 +179,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.openJob(openJobRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_open", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_open", request.getEndpoint());
         assertEquals(requestEntityToString(request), "{\"job_id\":\""+ jobId +"\",\"timeout\":\"10m\"}");
     }
 
@@ -171,7 +189,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.closeJob(closeJobRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_close", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_close", request.getEndpoint());
         assertEquals("{\"job_id\":\"somejobid\"}", requestEntityToString(request));
 
         closeJobRequest = new CloseJobRequest(jobId, "otherjobs*");
@@ -180,7 +198,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         closeJobRequest.setTimeout(TimeValue.timeValueMinutes(10));
         request = MLRequestConverters.closeJob(closeJobRequest);
 
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + ",otherjobs*/_close", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + ",otherjobs*/_close", request.getEndpoint());
         assertEquals("{\"job_id\":\"somejobid,otherjobs*\",\"timeout\":\"10m\",\"force\":true,\"allow_no_jobs\":false}",
             requestEntityToString(request));
     }
@@ -190,7 +208,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.deleteExpiredData(deleteExpiredDataRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/_delete_expired_data", request.getEndpoint());
+        assertEquals("/_ml/_delete_expired_data", request.getEndpoint());
     }
 
     public void testDeleteJob() {
@@ -199,7 +217,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.deleteJob(deleteJobRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId, request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId, request.getEndpoint());
         assertNull(request.getParameters().get("force"));
         assertNull(request.getParameters().get("wait_for_completion"));
 
@@ -220,7 +238,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.flushJob(flushJobRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_flush", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_flush", request.getEndpoint());
         assertEquals("{\"job_id\":\"" + jobId + "\"}", requestEntityToString(request));
 
         flushJobRequest.setSkipTime("1000");
@@ -243,7 +261,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         forecastJobRequest.setExpiresIn(TimeValue.timeValueHours(12));
         Request request = MLRequestConverters.forecastJob(forecastJobRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_forecast", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_forecast", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             ForecastJobRequest parsedRequest = ForecastJobRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(forecastJobRequest));
@@ -257,7 +275,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.updateJob(updateJobRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_update", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_update", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             JobUpdate.Builder parsedRequest = JobUpdate.PARSER.apply(parser, null);
             assertThat(parsedRequest.build(), equalTo(updates));
@@ -271,7 +289,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.putDatafeed(putDatafeedRequest);
 
         assertEquals(HttpPut.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/datafeeds/" + datafeed.getId()));
+        assertThat(request.getEndpoint(), equalTo("/_ml/datafeeds/" + datafeed.getId()));
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             DatafeedConfig parsedDatafeed = DatafeedConfig.PARSER.apply(parser, null).build();
             assertThat(parsedDatafeed, equalTo(datafeed));
@@ -284,14 +302,14 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.getDatafeed(getDatafeedRequest);
 
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds", request.getEndpoint());
+        assertEquals("/_ml/datafeeds", request.getEndpoint());
         assertFalse(request.getParameters().containsKey("allow_no_datafeeds"));
 
         getDatafeedRequest = new GetDatafeedRequest("feed-1", "feed-*");
         getDatafeedRequest.setAllowNoDatafeeds(true);
         request = MLRequestConverters.getDatafeed(getDatafeedRequest);
 
-        assertEquals("/_xpack/ml/datafeeds/feed-1,feed-*", request.getEndpoint());
+        assertEquals("/_ml/datafeeds/feed-1,feed-*", request.getEndpoint());
         assertEquals(Boolean.toString(true), request.getParameters().get("allow_no_datafeeds"));
     }
 
@@ -301,7 +319,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.deleteDatafeed(deleteDatafeedRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds/" + datafeedId, request.getEndpoint());
+        assertEquals("/_ml/datafeeds/" + datafeedId, request.getEndpoint());
         assertFalse(request.getParameters().containsKey("force"));
 
         deleteDatafeedRequest.setForce(true);
@@ -315,7 +333,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.startDatafeed(datafeedRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds/" + datafeedId + "/_start", request.getEndpoint());
+        assertEquals("/_ml/datafeeds/" + datafeedId + "/_start", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             StartDatafeedRequest parsedDatafeedRequest = StartDatafeedRequest.PARSER.apply(parser, null);
             assertThat(parsedDatafeedRequest, equalTo(datafeedRequest));
@@ -329,7 +347,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         datafeedRequest.setAllowNoDatafeeds(true);
         Request request = MLRequestConverters.stopDatafeed(datafeedRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds/" +
+        assertEquals("/_ml/datafeeds/" +
             Strings.collectionToCommaDelimitedString(datafeedRequest.getDatafeedIds()) +
             "/_stop", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
@@ -344,14 +362,14 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.getDatafeedStats(getDatafeedStatsRequestRequest);
 
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds/_stats", request.getEndpoint());
+        assertEquals("/_ml/datafeeds/_stats", request.getEndpoint());
         assertFalse(request.getParameters().containsKey("allow_no_datafeeds"));
 
         getDatafeedStatsRequestRequest = new GetDatafeedStatsRequest("datafeed1", "datafeeds*");
         getDatafeedStatsRequestRequest.setAllowNoDatafeeds(true);
         request = MLRequestConverters.getDatafeedStats(getDatafeedStatsRequestRequest);
 
-        assertEquals("/_xpack/ml/datafeeds/datafeed1,datafeeds*/_stats", request.getEndpoint());
+        assertEquals("/_ml/datafeeds/datafeed1,datafeeds*/_stats", request.getEndpoint());
         assertEquals(Boolean.toString(true), request.getParameters().get("allow_no_datafeeds"));
     }
 
@@ -359,7 +377,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         PreviewDatafeedRequest datafeedRequest = new PreviewDatafeedRequest("datafeed_1");
         Request request = MLRequestConverters.previewDatafeed(datafeedRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/datafeeds/" + datafeedRequest.getDatafeedId() + "/_preview", request.getEndpoint());
+        assertEquals("/_ml/datafeeds/" + datafeedRequest.getDatafeedId() + "/_preview", request.getEndpoint());
     }
 
     public void testDeleteForecast() {
@@ -368,7 +386,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.deleteForecast(deleteForecastRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_forecast", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_forecast", request.getEndpoint());
         assertFalse(request.getParameters().containsKey("timeout"));
         assertFalse(request.getParameters().containsKey("allow_no_forecasts"));
 
@@ -378,7 +396,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         request = MLRequestConverters.deleteForecast(deleteForecastRequest);
         assertEquals(
-            "/_xpack/ml/anomaly_detectors/" +
+            "/_ml/anomaly_detectors/" +
                 jobId +
                 "/_forecast/" +
                 Strings.collectionToCommaDelimitedString(deleteForecastRequest.getForecastIds()),
@@ -396,7 +414,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.deleteModelSnapshot(deleteModelSnapshotRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId, request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId, request.getEndpoint());
     }
 
     public void testGetBuckets() throws IOException {
@@ -409,7 +427,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getBuckets(getBucketsRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/results/buckets", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/results/buckets", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetBucketsRequest parsedRequest = GetBucketsRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getBucketsRequest));
@@ -424,7 +442,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getCategories(getCategoriesRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/results/categories", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/results/categories", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetCategoriesRequest parsedRequest = GetCategoriesRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getCategoriesRequest));
@@ -439,7 +457,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getModelSnapshots(getModelSnapshotsRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/model_snapshots", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/model_snapshots", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetModelSnapshotsRequest parsedRequest = GetModelSnapshotsRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getModelSnapshotsRequest));
@@ -455,7 +473,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.updateModelSnapshot(updateModelSnapshotRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId + "/_update", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId + "/_update", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             UpdateModelSnapshotRequest parsedRequest = UpdateModelSnapshotRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(updateModelSnapshotRequest));
@@ -472,7 +490,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.revertModelSnapshot(revertModelSnapshotRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId + "/_revert",
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/model_snapshots/" + snapshotId + "/_revert",
             request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             RevertModelSnapshotRequest parsedRequest = RevertModelSnapshotRequest.PARSER.apply(parser, null);
@@ -491,7 +509,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getOverallBuckets(getOverallBucketsRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/results/overall_buckets", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/results/overall_buckets", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetOverallBucketsRequest parsedRequest = GetOverallBucketsRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getOverallBucketsRequest));
@@ -511,7 +529,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getRecords(getRecordsRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/results/records", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/results/records", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetRecordsRequest parsedRequest = GetRecordsRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getRecordsRequest));
@@ -529,7 +547,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.postData(postDataRequest);
 
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/_data", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/_data", request.getEndpoint());
         assertEquals("{\"foo\":\"bar\"}", requestEntityToString(request));
         assertEquals(postDataRequest.getXContentType().mediaTypeWithoutParameters(), request.getEntity().getContentType().getValue());
         assertFalse(request.getParameters().containsKey(PostDataRequest.RESET_END.getPreferredName()));
@@ -559,7 +577,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getInfluencers(getInfluencersRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/anomaly_detectors/" + jobId + "/results/influencers", request.getEndpoint());
+        assertEquals("/_ml/anomaly_detectors/" + jobId + "/results/influencers", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetInfluencersRequest parsedRequest = GetInfluencersRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getInfluencersRequest));
@@ -570,7 +588,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         PutCalendarRequest putCalendarRequest = new PutCalendarRequest(CalendarTests.testInstance());
         Request request = MLRequestConverters.putCalendar(putCalendarRequest);
         assertEquals(HttpPut.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + putCalendarRequest.getCalendar().getId(), request.getEndpoint());
+        assertEquals("/_ml/calendars/" + putCalendarRequest.getCalendar().getId(), request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             Calendar parsedCalendar = Calendar.PARSER.apply(parser, null);
             assertThat(parsedCalendar, equalTo(putCalendarRequest.getCalendar()));
@@ -584,7 +602,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         PutCalendarJobRequest putCalendarJobRequest = new PutCalendarJobRequest(calendarId, job1, job2);
         Request request = MLRequestConverters.putCalendarJob(putCalendarJobRequest);
         assertEquals(HttpPut.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + calendarId + "/jobs/" + job1 + "," + job2, request.getEndpoint());
+        assertEquals("/_ml/calendars/" + calendarId + "/jobs/" + job1 + "," + job2, request.getEndpoint());
     }
 
     public void testDeleteCalendarJob() {
@@ -594,12 +612,12 @@ public class MLRequestConvertersTests extends ESTestCase {
         DeleteCalendarJobRequest deleteCalendarJobRequest = new DeleteCalendarJobRequest(calendarId, job1, job2);
         Request request = MLRequestConverters.deleteCalendarJob(deleteCalendarJobRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + calendarId + "/jobs/" + job1 + "," + job2, request.getEndpoint());
+        assertEquals("/_ml/calendars/" + calendarId + "/jobs/" + job1 + "," + job2, request.getEndpoint());
     }
 
     public void testGetCalendars() throws IOException {
         GetCalendarsRequest getCalendarsRequest = new GetCalendarsRequest();
-        String expectedEndpoint = "/_xpack/ml/calendars";
+        String expectedEndpoint = "/_ml/calendars";
 
         if (randomBoolean()) {
             String calendarId = randomAlphaOfLength(10);
@@ -623,7 +641,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         DeleteCalendarRequest deleteCalendarRequest = new DeleteCalendarRequest(randomAlphaOfLength(10));
         Request request = MLRequestConverters.deleteCalendar(deleteCalendarRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + deleteCalendarRequest.getCalendarId(), request.getEndpoint());
+        assertEquals("/_ml/calendars/" + deleteCalendarRequest.getCalendarId(), request.getEndpoint());
     }
 
     public void testGetCalendarEvents() throws IOException {
@@ -636,7 +654,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getCalendarEvents(getCalendarEventsRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + calendarId + "/events", request.getEndpoint());
+        assertEquals("/_ml/calendars/" + calendarId + "/events", request.getEndpoint());
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             GetCalendarEventsRequest parsedRequest = GetCalendarEventsRequest.PARSER.apply(parser, null);
             assertThat(parsedRequest, equalTo(getCalendarEventsRequest));
@@ -652,7 +670,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.postCalendarEvents(postCalendarEventRequest);
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + calendarId + "/events", request.getEndpoint());
+        assertEquals("/_ml/calendars/" + calendarId + "/events", request.getEndpoint());
 
         XContentBuilder builder = JsonXContent.contentBuilder();
         builder = postCalendarEventRequest.toXContent(builder, PostCalendarEventRequest.EXCLUDE_CALENDAR_ID_PARAMS);
@@ -665,7 +683,119 @@ public class MLRequestConvertersTests extends ESTestCase {
         DeleteCalendarEventRequest deleteCalendarEventRequest = new DeleteCalendarEventRequest(calendarId, eventId);
         Request request = MLRequestConverters.deleteCalendarEvent(deleteCalendarEventRequest);
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/calendars/" + calendarId + "/events/" + eventId, request.getEndpoint());
+        assertEquals("/_ml/calendars/" + calendarId + "/events/" + eventId, request.getEndpoint());
+    }
+
+    public void testPutDataFrameAnalytics() throws IOException {
+        PutDataFrameAnalyticsRequest putRequest = new PutDataFrameAnalyticsRequest(randomDataFrameAnalyticsConfig());
+        Request request = MLRequestConverters.putDataFrameAnalytics(putRequest);
+        assertEquals(HttpPut.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + putRequest.getConfig().getId(), request.getEndpoint());
+        try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
+            DataFrameAnalyticsConfig parsedConfig = DataFrameAnalyticsConfig.fromXContent(parser);
+            assertThat(parsedConfig, equalTo(putRequest.getConfig()));
+        }
+    }
+
+    public void testGetDataFrameAnalytics() {
+        String configId1 = randomAlphaOfLength(10);
+        String configId2 = randomAlphaOfLength(10);
+        String configId3 = randomAlphaOfLength(10);
+        GetDataFrameAnalyticsRequest getRequest = new GetDataFrameAnalyticsRequest(configId1, configId2, configId3)
+            .setAllowNoMatch(false)
+            .setPageParams(new PageParams(100, 300));
+
+        Request request = MLRequestConverters.getDataFrameAnalytics(getRequest);
+        assertEquals(HttpGet.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + configId1 + "," + configId2 + "," + configId3, request.getEndpoint());
+        assertThat(request.getParameters(), allOf(hasEntry("from", "100"), hasEntry("size", "300"), hasEntry("allow_no_match", "false")));
+        assertNull(request.getEntity());
+    }
+
+    public void testGetDataFrameAnalyticsStats() {
+        String configId1 = randomAlphaOfLength(10);
+        String configId2 = randomAlphaOfLength(10);
+        String configId3 = randomAlphaOfLength(10);
+        GetDataFrameAnalyticsStatsRequest getStatsRequest = new GetDataFrameAnalyticsStatsRequest(configId1, configId2, configId3)
+            .setAllowNoMatch(false)
+            .setPageParams(new PageParams(100, 300));
+
+        Request request = MLRequestConverters.getDataFrameAnalyticsStats(getStatsRequest);
+        assertEquals(HttpGet.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + configId1 + "," + configId2 + "," + configId3 + "/_stats", request.getEndpoint());
+        assertThat(request.getParameters(), allOf(hasEntry("from", "100"), hasEntry("size", "300"), hasEntry("allow_no_match", "false")));
+        assertNull(request.getEntity());
+    }
+
+    public void testStartDataFrameAnalytics() {
+        StartDataFrameAnalyticsRequest startRequest = new StartDataFrameAnalyticsRequest(randomAlphaOfLength(10));
+        Request request = MLRequestConverters.startDataFrameAnalytics(startRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + startRequest.getId() + "/_start", request.getEndpoint());
+        assertNull(request.getEntity());
+    }
+
+    public void testStartDataFrameAnalytics_WithTimeout() {
+        StartDataFrameAnalyticsRequest startRequest = new StartDataFrameAnalyticsRequest(randomAlphaOfLength(10))
+            .setTimeout(TimeValue.timeValueMinutes(1));
+        Request request = MLRequestConverters.startDataFrameAnalytics(startRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + startRequest.getId() + "/_start", request.getEndpoint());
+        assertThat(request.getParameters(), hasEntry("timeout", "1m"));
+        assertNull(request.getEntity());
+    }
+
+    public void testStopDataFrameAnalytics() {
+        StopDataFrameAnalyticsRequest stopRequest = new StopDataFrameAnalyticsRequest(randomAlphaOfLength(10));
+        Request request = MLRequestConverters.stopDataFrameAnalytics(stopRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + stopRequest.getId() + "/_stop", request.getEndpoint());
+        assertNull(request.getEntity());
+    }
+
+    public void testStopDataFrameAnalytics_WithParams() {
+        StopDataFrameAnalyticsRequest stopRequest = new StopDataFrameAnalyticsRequest(randomAlphaOfLength(10))
+            .setTimeout(TimeValue.timeValueMinutes(1))
+            .setAllowNoMatch(false)
+            .setForce(true);
+        Request request = MLRequestConverters.stopDataFrameAnalytics(stopRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + stopRequest.getId() + "/_stop", request.getEndpoint());
+        assertThat(request.getParameters(), allOf(
+            hasEntry("timeout", "1m"),
+            hasEntry("allow_no_match", "false"),
+            hasEntry("force", "true")));
+        assertNull(request.getEntity());
+    }
+
+    public void testDeleteDataFrameAnalytics() {
+        DeleteDataFrameAnalyticsRequest deleteRequest = new DeleteDataFrameAnalyticsRequest(randomAlphaOfLength(10));
+        Request request = MLRequestConverters.deleteDataFrameAnalytics(deleteRequest);
+        assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/" + deleteRequest.getId(), request.getEndpoint());
+        assertNull(request.getEntity());
+    }
+
+    public void testEvaluateDataFrame() throws IOException {
+        EvaluateDataFrameRequest evaluateRequest = EvaluateDataFrameRequestTests.createRandom();
+        Request request = MLRequestConverters.evaluateDataFrame(evaluateRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/_evaluate", request.getEndpoint());
+        try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
+            EvaluateDataFrameRequest parsedRequest = EvaluateDataFrameRequest.fromXContent(parser);
+            assertThat(parsedRequest, equalTo(evaluateRequest));
+        }
+    }
+
+    public void testEstimateMemoryUsage() throws IOException {
+        PutDataFrameAnalyticsRequest estimateRequest = new PutDataFrameAnalyticsRequest(randomDataFrameAnalyticsConfig());
+        Request request = MLRequestConverters.estimateMemoryUsage(estimateRequest);
+        assertEquals(HttpPost.METHOD_NAME, request.getMethod());
+        assertEquals("/_ml/data_frame/analytics/_estimate_memory_usage", request.getEndpoint());
+        try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
+            DataFrameAnalyticsConfig parsedConfig = DataFrameAnalyticsConfig.fromXContent(parser);
+            assertThat(parsedConfig, equalTo(estimateRequest.getConfig()));
+        }
     }
 
     public void testPutFilter() throws IOException {
@@ -675,7 +805,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.putFilter(putFilterRequest);
 
         assertEquals(HttpPut.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/filters/foo"));
+        assertThat(request.getEndpoint(), equalTo("/_ml/filters/foo"));
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             MlFilter parsedFilter = MlFilter.PARSER.apply(parser, null).build();
             assertThat(parsedFilter, equalTo(filter));
@@ -690,7 +820,7 @@ public class MLRequestConvertersTests extends ESTestCase {
 
         Request request = MLRequestConverters.getFilter(getFiltersRequest);
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/filters/" + id, request.getEndpoint());
+        assertEquals("/_ml/filters/" + id, request.getEndpoint());
         assertThat(request.getParameters().get(PageParams.FROM.getPreferredName()), is(nullValue()));
         assertThat(request.getParameters().get(PageParams.SIZE.getPreferredName()), is(nullValue()));
 
@@ -711,7 +841,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.updateFilter(updateFilterRequest);
 
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/filters/"+filterId+"/_update"));
+        assertThat(request.getEndpoint(), equalTo("/_ml/filters/"+filterId+"/_update"));
         try (XContentParser parser = createParser(JsonXContent.jsonXContent, request.getEntity().getContent())) {
             UpdateFilterRequest parsedFilterRequest = UpdateFilterRequest.PARSER.apply(parser, null);
             assertThat(parsedFilterRequest, equalTo(updateFilterRequest));
@@ -725,7 +855,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.deleteFilter(deleteFilterRequest);
 
         assertEquals(HttpDelete.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/filters/foo"));
+        assertThat(request.getEndpoint(), equalTo("/_ml/filters/foo"));
         assertNull(request.getEntity());
     }
 
@@ -735,7 +865,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.mlInfo(infoRequest);
 
         assertEquals(HttpGet.METHOD_NAME, request.getMethod());
-        assertThat(request.getEndpoint(), equalTo("/_xpack/ml/info"));
+        assertThat(request.getEndpoint(), equalTo("/_ml/info"));
         assertNull(request.getEntity());
     }
 
@@ -747,7 +877,7 @@ public class MLRequestConvertersTests extends ESTestCase {
         Request request = MLRequestConverters.findFileStructure(findFileStructureRequest);
 
         assertEquals(HttpPost.METHOD_NAME, request.getMethod());
-        assertEquals("/_xpack/ml/find_file_structure", request.getEndpoint());
+        assertEquals("/_ml/find_file_structure", request.getEndpoint());
         if (findFileStructureRequest.getLinesToSample() != null) {
             assertEquals(findFileStructureRequest.getLinesToSample(), Integer.valueOf(request.getParameters().get("lines_to_sample")));
         } else {
@@ -816,6 +946,31 @@ public class MLRequestConvertersTests extends ESTestCase {
             assertNull(request.getParameters().get("explain"));
         }
         assertEquals(sample, requestEntityToString(request));
+    }
+
+    public void testSetUpgradeMode() {
+        SetUpgradeModeRequest setUpgradeModeRequest = new SetUpgradeModeRequest(true);
+
+        Request request = MLRequestConverters.setUpgradeMode(setUpgradeModeRequest);
+        assertThat(request.getEndpoint(), equalTo("/_ml/set_upgrade_mode"));
+        assertThat(request.getMethod(), equalTo(HttpPost.METHOD_NAME));
+        assertThat(request.getParameters().get(SetUpgradeModeRequest.ENABLED.getPreferredName()), equalTo(Boolean.toString(true)));
+        assertThat(request.getParameters().containsKey(SetUpgradeModeRequest.TIMEOUT.getPreferredName()), is(false));
+
+        setUpgradeModeRequest.setTimeout(TimeValue.timeValueHours(1));
+        setUpgradeModeRequest.setEnabled(false);
+        request = MLRequestConverters.setUpgradeMode(setUpgradeModeRequest);
+        assertThat(request.getParameters().get(SetUpgradeModeRequest.ENABLED.getPreferredName()), equalTo(Boolean.toString(false)));
+        assertThat(request.getParameters().get(SetUpgradeModeRequest.TIMEOUT.getPreferredName()), is("1h"));
+    }
+
+    @Override
+    protected NamedXContentRegistry xContentRegistry() {
+        List<NamedXContentRegistry.Entry> namedXContent = new ArrayList<>();
+        namedXContent.addAll(new SearchModule(Settings.EMPTY, Collections.emptyList()).getNamedXContents());
+        namedXContent.addAll(new MlDataFrameAnalysisNamedXContentProvider().getNamedXContentParsers());
+        namedXContent.addAll(new MlEvaluationNamedXContentProvider().getNamedXContentParsers());
+        return new NamedXContentRegistry(namedXContent);
     }
 
     private static Job createValidJob(String jobId) {

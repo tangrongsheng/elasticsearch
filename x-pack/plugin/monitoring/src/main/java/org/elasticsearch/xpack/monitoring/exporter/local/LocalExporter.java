@@ -28,6 +28,7 @@ import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.regex.Regex;
+import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.XContentType;
@@ -38,23 +39,24 @@ import org.elasticsearch.license.LicenseStateListener;
 import org.elasticsearch.license.XPackLicenseState;
 import org.elasticsearch.protocol.xpack.watcher.DeleteWatchRequest;
 import org.elasticsearch.protocol.xpack.watcher.PutWatchRequest;
-import org.elasticsearch.protocol.xpack.watcher.PutWatchResponse;
-import org.elasticsearch.xpack.core.XPackClient;
 import org.elasticsearch.xpack.core.XPackSettings;
 import org.elasticsearch.xpack.core.monitoring.MonitoredSystem;
 import org.elasticsearch.xpack.core.monitoring.exporter.MonitoringTemplateUtils;
-import org.elasticsearch.xpack.core.watcher.client.WatcherClient;
+import org.elasticsearch.xpack.core.watcher.transport.actions.delete.DeleteWatchAction;
+import org.elasticsearch.xpack.core.watcher.transport.actions.get.GetWatchAction;
 import org.elasticsearch.xpack.core.watcher.transport.actions.get.GetWatchRequest;
 import org.elasticsearch.xpack.core.watcher.transport.actions.get.GetWatchResponse;
+import org.elasticsearch.xpack.core.watcher.transport.actions.put.PutWatchAction;
 import org.elasticsearch.xpack.core.watcher.watch.Watch;
 import org.elasticsearch.xpack.monitoring.cleaner.CleanerService;
 import org.elasticsearch.xpack.monitoring.exporter.ClusterAlertsUtil;
 import org.elasticsearch.xpack.monitoring.exporter.ExportBulk;
 import org.elasticsearch.xpack.monitoring.exporter.Exporter;
-import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
-import org.joda.time.format.DateTimeFormatter;
 
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -71,7 +73,6 @@ import java.util.stream.Collectors;
 import static org.elasticsearch.common.Strings.collectionToCommaDelimitedString;
 import static org.elasticsearch.xpack.core.ClientHelper.MONITORING_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.executeAsyncWithOrigin;
-import static org.elasticsearch.xpack.core.ClientHelper.stashWithOrigin;
 import static org.elasticsearch.xpack.core.monitoring.exporter.MonitoringTemplateUtils.LAST_UPDATED_VERSION;
 import static org.elasticsearch.xpack.core.monitoring.exporter.MonitoringTemplateUtils.PIPELINE_IDS;
 import static org.elasticsearch.xpack.core.monitoring.exporter.MonitoringTemplateUtils.TEMPLATE_VERSION;
@@ -90,7 +91,7 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
     private final XPackLicenseState licenseState;
     private final CleanerService cleanerService;
     private final boolean useIngest;
-    private final DateTimeFormatter dateTimeFormatter;
+    private final DateFormatter dateTimeFormatter;
     private final List<String> clusterAlertBlacklist;
 
     private final AtomicReference<State> state = new AtomicReference<>(State.INITIALIZED);
@@ -145,7 +146,11 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
         if (state.get() != State.RUNNING) {
             listener.onResponse(null);
         } else {
-            listener.onResponse(resolveBulk(clusterService.state(), false));
+            try {
+                listener.onResponse(resolveBulk(clusterService.state(), false));
+            } catch (Exception e) {
+                listener.onFailure(e);
+            }
         }
     }
 
@@ -248,7 +253,7 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
                                          final boolean clusterStateChange) {
         // we are on the elected master
         // Check that there is nothing that could block metadata updates
-        if (clusterState.blocks().hasGlobalBlock(ClusterBlockLevel.METADATA_WRITE)) {
+        if (clusterState.blocks().hasGlobalBlockWithLevel(ClusterBlockLevel.METADATA_WRITE)) {
             logger.debug("waiting until metadata writes are unblocked");
             return false;
         }
@@ -314,7 +319,7 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
         if (asyncActions.size() > 0) {
             if (installingSomething.compareAndSet(false, true)) {
                 pendingResponses.set(asyncActions.size());
-                try (ThreadContext.StoredContext ignore = stashWithOrigin(client.threadPool().getThreadContext(), MONITORING_ORIGIN)) {
+                try (ThreadContext.StoredContext ignore = client.threadPool().getThreadContext().stashWithOrigin(MONITORING_ORIGIN)) {
                     asyncActions.forEach(Runnable::run);
                 }
             } else {
@@ -426,8 +431,6 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
      */
     private void getClusterAlertsInstallationAsyncActions(final boolean indexExists, final List<Runnable> asyncActions,
                                                           final AtomicInteger pendingResponses) {
-        final XPackClient xpackClient = new XPackClient(client);
-        final WatcherClient watcher = xpackClient.watcher();
         final boolean canAddWatches = licenseState.isMonitoringClusterAlertsAllowed();
 
         for (final String watchId : ClusterAlertsUtil.WATCH_IDS) {
@@ -439,31 +442,30 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
                 if (addWatch) {
                     logger.trace("checking monitoring watch [{}]", uniqueWatchId);
 
-                    asyncActions.add(() -> watcher.getWatch(new GetWatchRequest(uniqueWatchId),
-                                                            new GetAndPutWatchResponseActionListener(watcher, watchId, uniqueWatchId,
+                    asyncActions.add(() -> client.execute(GetWatchAction.INSTANCE, new GetWatchRequest(uniqueWatchId),
+                                                            new GetAndPutWatchResponseActionListener(client, watchId, uniqueWatchId,
                                                                                                      pendingResponses)));
                 } else {
                     logger.trace("pruning monitoring watch [{}]", uniqueWatchId);
 
-                    asyncActions.add(() -> watcher.deleteWatch(new DeleteWatchRequest(uniqueWatchId),
+                    asyncActions.add(() -> client.execute(DeleteWatchAction.INSTANCE, new DeleteWatchRequest(uniqueWatchId),
                                                                new ResponseActionListener<>("watch", uniqueWatchId, pendingResponses)));
                 }
             } else if (addWatch) {
-                asyncActions.add(() -> putWatch(watcher, watchId, uniqueWatchId, pendingResponses));
+                asyncActions.add(() -> putWatch(client, watchId, uniqueWatchId, pendingResponses));
             }
         }
     }
 
-    private void putWatch(final WatcherClient watcher, final String watchId, final String uniqueWatchId,
+    private void putWatch(final Client client, final String watchId, final String uniqueWatchId,
                           final AtomicInteger pendingResponses) {
         final String watch = ClusterAlertsUtil.loadWatch(clusterService, watchId);
 
         logger.trace("adding monitoring watch [{}]", uniqueWatchId);
 
-        executeAsyncWithOrigin(client.threadPool().getThreadContext(), MONITORING_ORIGIN,
+        executeAsyncWithOrigin(client, MONITORING_ORIGIN, PutWatchAction.INSTANCE,
                 new PutWatchRequest(uniqueWatchId, new BytesArray(watch), XContentType.JSON),
-                new ResponseActionListener<PutWatchResponse>("watch", uniqueWatchId, pendingResponses, watcherSetup),
-                watcher::putWatch);
+                new ResponseActionListener<>("watch", uniqueWatchId, pendingResponses, watcherSetup));
     }
 
     /**
@@ -486,12 +488,12 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
         if (clusterService.state().nodes().isLocalNodeElectedMaster()) {
             // Reference date time will be compared to index.creation_date settings,
             // that's why it must be in UTC
-            DateTime expiration = new DateTime(DateTimeZone.UTC).minus(retention.millis());
+            ZonedDateTime expiration = ZonedDateTime.now(ZoneOffset.UTC).minus(retention.millis(), ChronoUnit.MILLIS);
             logger.debug("cleaning indices [expiration={}, retention={}]", expiration, retention);
 
             ClusterState clusterState = clusterService.state();
             if (clusterState != null) {
-                final long expirationTimeMillis = expiration.getMillis();
+                final long expirationTimeMillis = expiration.toInstant().toEpochMilli();
                 final long currentTimeMillis = System.currentTimeMillis();
                 final boolean cleanUpWatcherHistory = clusterService.getClusterSettings().get(CLEAN_WATCHER_HISTORY);
 
@@ -521,7 +523,7 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
                         if (creationDate <= expirationTimeMillis) {
                             if (logger.isDebugEnabled()) {
                                 logger.debug("detected expired index [name={}, created={}, expired={}]",
-                                        indexName, new DateTime(creationDate, DateTimeZone.UTC), expiration);
+                                        indexName, Instant.ofEpochMilli(creationDate).atZone(ZoneOffset.UTC), expiration);
                             }
                             indices.add(indexName);
                         }
@@ -611,15 +613,15 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
 
     private class GetAndPutWatchResponseActionListener implements ActionListener<GetWatchResponse> {
 
-        private final WatcherClient watcher;
+        private final Client client;
         private final String watchId;
         private final String uniqueWatchId;
         private final AtomicInteger countDown;
 
-        private GetAndPutWatchResponseActionListener(final WatcherClient watcher,
+        private GetAndPutWatchResponseActionListener(final Client client,
                                                      final String watchId, final String uniqueWatchId,
                                                      final AtomicInteger countDown) {
-            this.watcher = Objects.requireNonNull(watcher);
+            this.client = Objects.requireNonNull(client);
             this.watchId = Objects.requireNonNull(watchId);
             this.uniqueWatchId = Objects.requireNonNull(uniqueWatchId);
             this.countDown = Objects.requireNonNull(countDown);
@@ -633,7 +635,7 @@ public class LocalExporter extends Exporter implements ClusterStateListener, Cle
 
                 responseReceived(countDown, true, watcherSetup);
             } else {
-                putWatch(watcher, watchId, uniqueWatchId, countDown);
+                putWatch(client, watchId, uniqueWatchId, countDown);
             }
         }
 

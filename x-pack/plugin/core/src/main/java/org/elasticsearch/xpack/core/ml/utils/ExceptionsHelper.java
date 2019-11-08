@@ -10,6 +10,7 @@ import org.elasticsearch.ElasticsearchStatusException;
 import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.search.ShardSearchFailure;
+import org.elasticsearch.common.ParseField;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.SearchShardTarget;
 import org.elasticsearch.xpack.core.ml.job.messages.Messages;
@@ -28,6 +29,18 @@ public class ExceptionsHelper {
 
     public static ResourceNotFoundException missingDatafeedException(String datafeedId) {
         return new ResourceNotFoundException(Messages.getMessage(Messages.DATAFEED_NOT_FOUND, datafeedId));
+    }
+
+    public static ResourceAlreadyExistsException datafeedAlreadyExists(String datafeedId) {
+        return new ResourceAlreadyExistsException(Messages.getMessage(Messages.DATAFEED_ID_ALREADY_TAKEN, datafeedId));
+    }
+
+    public static ResourceNotFoundException missingDataFrameAnalytics(String id) {
+        return new ResourceNotFoundException("No known data frame analytics with id [{}]", id);
+    }
+
+    public static ResourceAlreadyExistsException dataFrameAnalyticsAlreadyExists(String id) {
+        return new ResourceAlreadyExistsException("A data frame analytics with id [{}] already exists", id);
     }
 
     public static ElasticsearchException serverError(String msg) {
@@ -54,6 +67,11 @@ public class ExceptionsHelper {
         return new ElasticsearchStatusException(msg, RestStatus.BAD_REQUEST, args);
     }
 
+    public static ElasticsearchStatusException configHasNotBeenMigrated(String verb, String id) {
+        return new ElasticsearchStatusException("cannot {} as the configuration [{}] is temporarily pending migration",
+                RestStatus.SERVICE_UNAVAILABLE, verb, id);
+    }
+
     /**
      * Creates an error message that explains there are shard failures, displays info
      * for the first failure (shard/reason) and kindly asks to see more info in the logs
@@ -76,5 +94,13 @@ public class ExceptionsHelper {
             throw new IllegalArgumentException("[" + paramName + "] must not be null.");
         }
         return obj;
+    }
+
+    public static <T> T requireNonNull(T obj, ParseField paramName) {
+        return requireNonNull(obj, paramName.getPreferredName());
+    }
+
+    public static Throwable unwrapCause(Throwable t) {
+       return org.elasticsearch.ExceptionsHelper.unwrapCause(t);
     }
 }

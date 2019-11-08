@@ -3,32 +3,30 @@
  * or more contributor license agreements. Licensed under the Elastic License;
  * you may not use this file except in compliance with the Elastic License.
  */
-package org.elasticsearch.xpack.rollup.rest;
 
+package org.elasticsearch.xpack.rollup.rest;
 
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.ParseField;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.action.RestToXContentListener;
 import org.elasticsearch.xpack.core.rollup.action.DeleteRollupJobAction;
-import org.elasticsearch.xpack.rollup.Rollup;
 
-import java.io.IOException;
+import static org.elasticsearch.rest.RestRequest.Method.DELETE;
 
 public class RestDeleteRollupJobAction extends BaseRestHandler {
+
     public static final ParseField ID = new ParseField("id");
 
-    public RestDeleteRollupJobAction(Settings settings, RestController controller) {
-        super(settings);
-        controller.registerHandler(RestRequest.Method.DELETE, Rollup.BASE_PATH +  "job/{id}/", this);
+    public RestDeleteRollupJobAction(RestController controller) {
+        controller.registerHandler(DELETE, "/_rollup/job/{id}", this);
     }
 
     @Override
-    protected RestChannelConsumer prepareRequest(RestRequest restRequest, NodeClient client) throws IOException {
+    protected RestChannelConsumer prepareRequest(RestRequest restRequest, NodeClient client) {
         String id = restRequest.param(ID.getPreferredName());
         DeleteRollupJobAction.Request request = new DeleteRollupJobAction.Request(id);
 
@@ -46,6 +44,7 @@ public class RestDeleteRollupJobAction extends BaseRestHandler {
 
     @Override
     public String getName() {
-        return "rollup_delete_job_action";
+        return "delete_rollup_job";
     }
+
 }

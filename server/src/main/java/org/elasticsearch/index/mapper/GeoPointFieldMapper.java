@@ -291,23 +291,16 @@ public class GeoPointFieldMapper extends FieldMapper implements ArrayValueMapper
     public void parse(ParseContext context) throws IOException {
         context.path().add(simpleName());
 
-        GeoPoint sparse = context.parseExternalValue(GeoPoint.class);
+        try {
+            GeoPoint sparse = context.parseExternalValue(GeoPoint.class);
 
-        if (sparse != null) {
-            parse(context, sparse);
-        } else {
-            sparse = new GeoPoint();
-            XContentParser.Token token = context.parser().currentToken();
-            if (token == XContentParser.Token.START_ARRAY) {
-                token = context.parser().nextToken();
+            if (sparse != null) {
+                parse(context, sparse);
+            } else {
+                sparse = new GeoPoint();
+                XContentParser.Token token = context.parser().currentToken();
                 if (token == XContentParser.Token.START_ARRAY) {
-                    // its an array of array of lon/lat [ [1.2, 1.3], [1.4, 1.5] ]
-                    while (token != XContentParser.Token.END_ARRAY) {
-                        parseGeoPointIgnoringMalformed(context, sparse);
-                        token = context.parser().nextToken();
-                    }
-                } else {
-                    // its an array of other possible values
+                    token = context.parser().nextToken();
                     if (token == XContentParser.Token.VALUE_NUMBER) {
                         double lon = context.parser().doubleValue();
                         context.parser().nextToken();
@@ -321,24 +314,20 @@ public class GeoPointFieldMapper extends FieldMapper implements ArrayValueMapper
                         parse(context, sparse.reset(lat, lon));
                     } else {
                         while (token != XContentParser.Token.END_ARRAY) {
-                            if (token == XContentParser.Token.VALUE_STRING) {
-                                parseGeoPointStringIgnoringMalformed(context, sparse);
-                            } else {
-                                parseGeoPointIgnoringMalformed(context, sparse);
-                            }
+                            parseGeoPointIgnoringMalformed(context, sparse);
                             token = context.parser().nextToken();
                         }
                     }
+                } else if (token == XContentParser.Token.VALUE_NULL) {
+                    if (fieldType.nullValue() != null) {
+                        parse(context, (GeoPoint) fieldType.nullValue());
+                    }
+                } else {
+                    parseGeoPointIgnoringMalformed(context, sparse);
                 }
-            } else if (token == XContentParser.Token.VALUE_STRING) {
-                parseGeoPointStringIgnoringMalformed(context, sparse);
-            } else if (token == XContentParser.Token.VALUE_NULL) {
-                if (fieldType.nullValue() != null) {
-                    parse(context, (GeoPoint) fieldType.nullValue());
-                }
-            } else {
-                 parseGeoPointIgnoringMalformed(context, sparse);
             }
+        } catch (Exception ex) {
+            throw new MapperParsingException("failed to parse field [{}] of type [{}]", ex, fieldType().name(), fieldType().typeName());
         }
 
         context.path().remove();
@@ -349,21 +338,7 @@ public class GeoPointFieldMapper extends FieldMapper implements ArrayValueMapper
      */
     private void parseGeoPointIgnoringMalformed(ParseContext context, GeoPoint sparse) throws IOException {
         try {
-            parse(context, GeoUtils.parseGeoPoint(context.parser(), sparse));
-        } catch (ElasticsearchParseException e) {
-            if (ignoreMalformed.value() == false) {
-                throw e;
-            }
-            context.addIgnoredField(fieldType.name());
-        }
-    }
-
-    /**
-     * Parses geopoint represented as a string and ignores malformed geopoints if needed
-     */
-    private void parseGeoPointStringIgnoringMalformed(ParseContext context, GeoPoint sparse) throws IOException {
-        try {
-            parse(context, sparse.resetFromString(context.parser().text(), ignoreZValue.value()));
+            parse(context, GeoUtils.parseGeoPoint(context.parser(), sparse, ignoreZValue.value()));
         } catch (ElasticsearchParseException e) {
             if (ignoreMalformed.value() == false) {
                 throw e;

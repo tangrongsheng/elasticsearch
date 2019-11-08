@@ -66,7 +66,7 @@ public class DeleteByQueryRequest extends AbstractBulkByScrollRequest<DeleteByQu
     }
 
     public DeleteByQueryRequest(StreamInput in) throws IOException {
-        super.readFrom(in);
+        super(in);
     }
 
     private DeleteByQueryRequest(SearchRequest search, boolean setDefaults) {
@@ -83,16 +83,6 @@ public class DeleteByQueryRequest extends AbstractBulkByScrollRequest<DeleteByQu
     public DeleteByQueryRequest setQuery(QueryBuilder query) {
         if (query != null) {
             getSearchRequest().source().query(query);
-        }
-        return this;
-    }
-
-    /**
-     * Set the document types for the delete
-     */
-    public DeleteByQueryRequest setDocTypes(String... types) {
-        if (types != null) {
-            getSearchRequest().types(types);
         }
         return this;
     }
@@ -135,18 +125,6 @@ public class DeleteByQueryRequest extends AbstractBulkByScrollRequest<DeleteByQu
      */
     public String getRouting() {
         return getSearchRequest().routing();
-    }
-
-    /**
-     * Gets the document types on which this request would be executed. Returns an empty array if all
-     * types are to be processed.
-     */
-    public String[] getDocTypes() {
-        if (getSearchRequest().types() != null) {
-            return getSearchRequest().types();
-        } else {
-            return new String[0];
-        }
     }
 
     @Override
@@ -200,17 +178,6 @@ public class DeleteByQueryRequest extends AbstractBulkByScrollRequest<DeleteByQu
     public IndicesOptions indicesOptions() {
         assert getSearchRequest() != null;
         return getSearchRequest().indicesOptions();
-    }
-
-    public String[] types() {
-        assert getSearchRequest() != null;
-        return getSearchRequest().types();
-    }
-
-    public DeleteByQueryRequest types(String... types) {
-        assert getSearchRequest() != null;
-        getSearchRequest().types(types);
-        return this;
     }
 
     @Override

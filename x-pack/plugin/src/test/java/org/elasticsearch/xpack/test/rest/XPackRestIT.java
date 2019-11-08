@@ -25,6 +25,7 @@ import org.elasticsearch.test.rest.yaml.ObjectPath;
 import org.elasticsearch.xpack.core.ml.MlMetaIndex;
 import org.elasticsearch.xpack.core.ml.integration.MlRestTestStateCleaner;
 import org.elasticsearch.xpack.core.ml.job.persistence.AnomalyDetectorsIndex;
+import org.elasticsearch.xpack.core.ml.job.persistence.AnomalyDetectorsIndexFields;
 import org.elasticsearch.xpack.core.ml.notifications.AuditorField;
 import org.elasticsearch.xpack.core.rollup.job.RollupJob;
 import org.elasticsearch.xpack.core.watcher.support.WatcherIndexTemplateRegistryField;
@@ -38,7 +39,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static java.util.Collections.emptyList;
@@ -46,8 +46,9 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
 import static org.elasticsearch.common.xcontent.support.XContentMapValues.extractValue;
-import static org.elasticsearch.rest.action.search.RestSearchAction.TOTAL_HIT_AS_INT_PARAM;
+import static org.elasticsearch.rest.action.search.RestSearchAction.TOTAL_HITS_AS_INT_PARAM;
 import static org.elasticsearch.xpack.core.security.authc.support.UsernamePasswordToken.basicAuthHeaderValue;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 
@@ -86,9 +87,13 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
     private void waitForTemplates() throws Exception {
         if (installTemplates()) {
             List<String> templates = new ArrayList<>();
-            templates.addAll(Arrays.asList(AuditorField.NOTIFICATIONS_INDEX, MlMetaIndex.INDEX_NAME,
-                    AnomalyDetectorsIndex.jobStateIndexName(),
-                    AnomalyDetectorsIndex.jobResultsIndexPrefix()));
+            templates.addAll(
+                Arrays.asList(
+                    AuditorField.NOTIFICATIONS_INDEX,
+                    MlMetaIndex.INDEX_NAME,
+                    AnomalyDetectorsIndexFields.STATE_INDEX_PREFIX,
+                    AnomalyDetectorsIndex.jobResultsIndexPrefix(),
+                    AnomalyDetectorsIndex.configIndexName()));
 
             for (String template : templates) {
                 awaitCallApi("indices.exists_template", singletonMap("name", template), emptyList(),
@@ -103,13 +108,13 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
         if (isWatcherTest()) {
             assertBusy(() -> {
                 ClientYamlTestResponse response =
-                    getAdminExecutionContext().callApi("xpack.watcher.stats", emptyMap(), emptyList(), emptyMap());
+                    getAdminExecutionContext().callApi("watcher.stats", emptyMap(), emptyList(), emptyMap());
                 String state = (String) response.evaluate("stats.0.watcher_state");
 
                 switch (state) {
                     case "stopped":
                         ClientYamlTestResponse startResponse =
-                            getAdminExecutionContext().callApi("xpack.watcher.start", emptyMap(), emptyList(), emptyMap());
+                            getAdminExecutionContext().callApi("watcher.start", emptyMap(), emptyList(), emptyMap());
                         boolean isAcknowledged = (boolean) startResponse.evaluate("acknowledged");
                         assertThat(isAcknowledged, is(true));
                         throw new AssertionError("waiting until stopped state reached started state");
@@ -138,7 +143,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                 return;
             }
             Request searchWatchesRequest = new Request("GET", ".watches/_search");
-            searchWatchesRequest.addParameter(TOTAL_HIT_AS_INT_PARAM, "true");
+            searchWatchesRequest.addParameter(TOTAL_HITS_AS_INT_PARAM, "true");
             searchWatchesRequest.addParameter("size", "1000");
             Response response = adminClient().performRequest(searchWatchesRequest);
             ObjectPath objectPathResponse = ObjectPath.createFromResponse(response);
@@ -147,7 +152,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                 List<Map<String, Object>> hits = objectPathResponse.evaluate("hits.hits");
                 for (Map<String, Object> hit : hits) {
                     String id = (String) hit.get("_id");
-                    adminClient().performRequest(new Request("DELETE", "_xpack/watcher/watch/" + id));
+                    adminClient().performRequest(new Request("DELETE", "_watcher/watch/" + id));
                 }
             }
         }
@@ -183,7 +188,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                     () -> "Exception when enabling monitoring");
             Map<String, String> searchParams = new HashMap<>();
             searchParams.put("index", ".monitoring-*");
-            searchParams.put(TOTAL_HIT_AS_INT_PARAM, "true");
+            searchParams.put(TOTAL_HITS_AS_INT_PARAM, "true");
             awaitCallApi("search", searchParams, emptyList(),
                     response -> ((Number) response.evaluate("hits.total")).intValue() > 0,
                     () -> "Exception when waiting for monitoring documents to be indexed");
@@ -208,7 +213,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                     },
                     () -> "Exception when disabling monitoring");
 
-            awaitBusy(() -> {
+            assertBusy(() -> {
                 try {
                     ClientYamlTestResponse response =
                             callApi("xpack.usage", singletonMap("filter_path", "monitoring.enabled_exporters"), emptyList(),
@@ -217,7 +222,7 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                     @SuppressWarnings("unchecked")
                     final Map<String, ?> exporters = (Map<String, ?>) response.evaluate("monitoring.enabled_exporters");
                     if (exporters.isEmpty() == false) {
-                        return false;
+                        fail("Exporters were not found");
                     }
 
                     final Map<String, String> params = new HashMap<>();
@@ -232,7 +237,8 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                     final Map<String, Object> node = (Map<String, Object>) nodes.values().iterator().next();
 
                     final Number activeWrites = (Number) extractValue("thread_pool.write.active", node);
-                    return activeWrites != null && activeWrites.longValue() == 0L;
+                    assertNotNull(activeWrites);
+                    assertThat(activeWrites, equalTo(0));
                 } catch (Exception e) {
                     throw new ElasticsearchException("Failed to wait for monitoring exporters to stop:", e);
                 }
@@ -276,26 +282,15 @@ public class XPackRestIT extends ESClientYamlSuiteTestCase {
                               Map<String, String> params,
                               List<Map<String, Object>> bodies,
                               CheckedFunction<ClientYamlTestResponse, Boolean, IOException> success,
-                              Supplier<String> error) throws Exception {
-
-        AtomicReference<IOException> exceptionHolder = new AtomicReference<>();
-        awaitBusy(() -> {
-            try {
-                ClientYamlTestResponse response = callApi(apiName, params, bodies, getApiCallHeaders());
-                if (response.getStatusCode() == HttpStatus.SC_OK) {
-                    exceptionHolder.set(null);
-                    return success.apply(response);
-                }
-                return false;
-            } catch (IOException e) {
-                exceptionHolder.set(e);
-            }
-            return false;
-        });
-
-        IOException exception = exceptionHolder.get();
-        if (exception != null) {
-            throw new IllegalStateException(error.get(), exception);
+                              Supplier<String> error) {
+        try {
+            // The actual method call that sends the API requests returns a Future, but we immediately
+            // call .get() on it so there's no need for this method to do any other awaiting.
+            ClientYamlTestResponse response = callApi(apiName, params, bodies, getApiCallHeaders());
+            assertEquals(response.getStatusCode(), HttpStatus.SC_OK);
+            success.apply(response);
+        } catch (Exception e) {
+            throw new IllegalStateException(error.get(), e);
         }
     }
 

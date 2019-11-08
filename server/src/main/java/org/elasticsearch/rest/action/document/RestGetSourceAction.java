@@ -25,7 +25,6 @@ import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.rest.BaseRestHandler;
@@ -49,10 +48,9 @@ import static org.elasticsearch.rest.RestStatus.OK;
  */
 public class RestGetSourceAction extends BaseRestHandler {
 
-    public RestGetSourceAction(final Settings settings, final RestController controller) {
-        super(settings);
-        controller.registerHandler(GET, "/{index}/{type}/{id}/_source", this);
-        controller.registerHandler(HEAD, "/{index}/{type}/{id}/_source", this);
+    public RestGetSourceAction(final RestController controller) {
+        controller.registerHandler(GET, "/{index}/_source/{id}", this);
+        controller.registerHandler(HEAD, "/{index}/_source/{id}", this);
     }
 
     @Override
@@ -62,7 +60,7 @@ public class RestGetSourceAction extends BaseRestHandler {
 
     @Override
     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
-        final GetRequest getRequest = new GetRequest(request.param("index"), request.param("type"), request.param("id"));
+        final GetRequest getRequest = new GetRequest(request.param("index"), request.param("id"));
         getRequest.refresh(request.paramAsBoolean("refresh", getRequest.refresh()));
         getRequest.routing(request.param("routing"));
         getRequest.preference(request.param("preference"));
@@ -109,13 +107,12 @@ public class RestGetSourceAction extends BaseRestHandler {
          */
         private void checkResource(final GetResponse response) {
             final String index = response.getIndex();
-            final String type = response.getType();
             final String id = response.getId();
 
             if (response.isExists() == false) {
-                throw new ResourceNotFoundException("Document not found [" + index + "]/[" + type + "]/[" + id + "]");
+                throw new ResourceNotFoundException("Document not found [" + index + "]/[" + id + "]");
             } else if (response.isSourceEmpty()) {
-                throw new ResourceNotFoundException("Source not found [" + index + "]/[" + type + "]/[" + id + "]");
+                throw new ResourceNotFoundException("Source not found [" + index + "]/[" + id + "]");
             }
         }
     }

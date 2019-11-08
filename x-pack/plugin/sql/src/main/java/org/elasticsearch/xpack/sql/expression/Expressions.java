@@ -5,20 +5,19 @@
  */
 package org.elasticsearch.xpack.sql.expression;
 
-import org.elasticsearch.common.Strings;
 import org.elasticsearch.xpack.sql.SqlIllegalArgumentException;
-import org.elasticsearch.xpack.sql.expression.Expression.TypeResolution;
 import org.elasticsearch.xpack.sql.expression.gen.pipeline.Pipe;
 import org.elasticsearch.xpack.sql.type.DataType;
 import org.elasticsearch.xpack.sql.type.DataTypes;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
+import java.util.Set;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
-import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
 
@@ -35,7 +34,7 @@ public final class Expressions {
     private Expressions() {}
 
     public static NamedExpression wrapAsNamed(Expression exp) {
-        return exp instanceof NamedExpression ? (NamedExpression) exp : new Alias(exp.location(), exp.nodeName(), exp);
+        return exp instanceof NamedExpression ? (NamedExpression) exp : new Alias(exp.source(), exp.sourceText(), exp);
     }
 
     public static List<Attribute> asAttributes(List<? extends NamedExpression> named) {
@@ -70,13 +69,17 @@ public final class Expressions {
         return false;
     }
 
-    public static boolean nullable(List<? extends Expression> exps) {
+    public static boolean match(List<? extends Expression> exps, Predicate<? super Expression> predicate) {
         for (Expression exp : exps) {
-            if (exp.nullable()) {
+            if (predicate.test(exp)) {
                 return true;
             }
         }
         return false;
+    }
+
+    public static Nullability nullable(List<? extends Expression> exps) {
+        return Nullability.and(exps.stream().map(Expression::nullable).toArray(Nullability[]::new));
     }
 
     public static boolean foldable(List<? extends Expression> exps) {
@@ -98,6 +101,31 @@ public final class Expressions {
             set.addAll(exp.references());
         }
         return set;
+    }
+
+    public static AttributeSet filterReferences(Set<? extends Expression> exps, AttributeSet excluded) {
+        AttributeSet ret = new AttributeSet();
+        while (exps.size() > 0) {
+
+            Set<Expression> filteredExps = new LinkedHashSet<>();
+            for (Expression exp : exps) {
+                Expression attr = Expressions.attribute(exp);
+                if (attr == null || (excluded.contains(attr) == false)) {
+                    filteredExps.add(exp);
+                }
+            }
+
+            ret.addAll(new AttributeSet(
+                filteredExps.stream().filter(c->c.children().isEmpty())
+                .flatMap(exp->exp.references().stream())
+                .collect(Collectors.toSet())
+            ));
+
+            exps = filteredExps.stream()
+                .flatMap((Expression exp)->exp.children().stream())
+                .collect(Collectors.toSet());
+        }
+        return ret;
     }
 
     public static String name(Expression e) {
@@ -135,6 +163,30 @@ public final class Expressions {
         return true;
     }
 
+    public static List<Attribute> onlyPrimitiveFieldAttributes(Collection<Attribute> attributes) {
+        List<Attribute> filtered = new ArrayList<>();
+        // add only primitives
+        // but filter out multi fields (allow only the top-level value)
+        Set<Attribute> seenMultiFields = new LinkedHashSet<>();
+
+        for (Attribute a : attributes) {
+            if (!DataTypes.isUnsupported(a.dataType()) && a.dataType().isPrimitive()) {
+                if (a instanceof FieldAttribute) {
+                    FieldAttribute fa = (FieldAttribute) a;
+                    // skip nested fields and seen multi-fields
+                    if (!fa.isNested() && !seenMultiFields.contains(fa.parent())) {
+                        filtered.add(a);
+                        seenMultiFields.add(a);
+                    }
+                } else {
+                    filtered.add(a);
+                }
+            }
+        }
+
+        return filtered;
+    }
+
     public static Pipe pipe(Expression e) {
         if (e instanceof NamedExpression) {
             return ((NamedExpression) e).asPipe();
@@ -148,44 +200,5 @@ public final class Expressions {
             pipes.add(pipe(e));
         }
         return pipes;
-    }
-
-    public static TypeResolution typeMustBeBoolean(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, dt -> dt == DataType.BOOLEAN, operationName, paramOrd, "boolean");
-    }
-
-    public static TypeResolution typeMustBeInteger(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, DataType::isInteger, operationName, paramOrd, "integer");
-    }
-
-    public static TypeResolution typeMustBeNumeric(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, DataType::isNumeric, operationName, paramOrd, "numeric");
-    }
-
-    public static TypeResolution typeMustBeString(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, DataType::isString, operationName, paramOrd, "string");
-    }
-
-    public static TypeResolution typeMustBeDate(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, dt -> dt == DataType.DATE, operationName, paramOrd, "date");
-    }
-
-    public static TypeResolution typeMustBeNumericOrDate(Expression e, String operationName, ParamOrdinal paramOrd) {
-        return typeMustBe(e, dt -> dt.isNumeric() || dt == DataType.DATE, operationName, paramOrd, "numeric", "date");
-    }
-
-    public static TypeResolution typeMustBe(Expression e,
-                                             Predicate<DataType> predicate,
-                                             String operationName,
-                                             ParamOrdinal paramOrd,
-                                             String... acceptedTypes) {
-        return predicate.test(e.dataType()) || DataTypes.isNull(e.dataType())?
-            TypeResolution.TYPE_RESOLVED :
-            new TypeResolution(format(Locale.ROOT, "[%s]%s argument must be [%s], found value [%s] type [%s]",
-                    operationName,
-                    paramOrd == null || paramOrd == ParamOrdinal.DEFAULT ? "" : " " + paramOrd.name().toLowerCase(Locale.ROOT),
-                    Strings.arrayToDelimitedString(acceptedTypes, " or "),
-                    Expressions.name(e),
-                    e.dataType().esType));
     }
 }

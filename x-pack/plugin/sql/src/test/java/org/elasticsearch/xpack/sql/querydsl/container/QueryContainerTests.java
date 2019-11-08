@@ -5,60 +5,113 @@
  */
 package org.elasticsearch.xpack.sql.querydsl.container;
 
-import java.util.AbstractMap.SimpleImmutableEntry;
-
-import org.elasticsearch.search.fetch.subphase.DocValueFieldsContext;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xpack.sql.expression.Alias;
+import org.elasticsearch.xpack.sql.expression.Attribute;
+import org.elasticsearch.xpack.sql.expression.ExpressionId;
+import org.elasticsearch.xpack.sql.expression.FieldAttribute;
 import org.elasticsearch.xpack.sql.querydsl.query.BoolQuery;
 import org.elasticsearch.xpack.sql.querydsl.query.MatchAll;
 import org.elasticsearch.xpack.sql.querydsl.query.NestedQuery;
 import org.elasticsearch.xpack.sql.querydsl.query.Query;
 import org.elasticsearch.xpack.sql.querydsl.query.RangeQuery;
-import org.elasticsearch.xpack.sql.tree.Location;
-import org.elasticsearch.xpack.sql.tree.LocationTests;
+import org.elasticsearch.xpack.sql.tree.Source;
+import org.elasticsearch.xpack.sql.tree.SourceTests;
+import org.elasticsearch.xpack.sql.type.DataType;
+import org.elasticsearch.xpack.sql.type.EsField;
+
+import java.util.AbstractMap.SimpleImmutableEntry;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 
 public class QueryContainerTests extends ESTestCase {
-    private Location location = LocationTests.randomLocation();
+    private Source source = SourceTests.randomSource();
     private String path = randomAlphaOfLength(5);
     private String name = randomAlphaOfLength(5);
-    private String format = DocValueFieldsContext.USE_DEFAULT_FORMAT;
+    private String format = null;
     private boolean hasDocValues = randomBoolean();
 
     public void testRewriteToContainNestedFieldNoQuery() {
-        Query expected = new NestedQuery(location, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
-                new MatchAll(location));
-        assertEquals(expected, QueryContainer.rewriteToContainNestedField(null, location, path, name, format, hasDocValues));
+        Query expected = new NestedQuery(source, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
+                new MatchAll(source));
+        assertEquals(expected, QueryContainer.rewriteToContainNestedField(null, source, path, name, format, hasDocValues));
     }
 
     public void testRewriteToContainsNestedFieldWhenContainsNestedField() {
-        Query original = new BoolQuery(location, true,
-            new NestedQuery(location, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
-                    new MatchAll(location)),
-            new RangeQuery(location, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean()));
-        assertSame(original, QueryContainer.rewriteToContainNestedField(original, location, path, name, format, randomBoolean()));
+        Query original = new BoolQuery(source, true,
+            new NestedQuery(source, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
+                    new MatchAll(source)),
+            new RangeQuery(source, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean()));
+        assertSame(original, QueryContainer.rewriteToContainNestedField(original, source, path, name, format, randomBoolean()));
     }
 
     public void testRewriteToContainsNestedFieldWhenCanAddNestedField() {
-        Query buddy = new RangeQuery(location, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean());
-        Query original = new BoolQuery(location, true,
-            new NestedQuery(location, path, emptyMap(), new MatchAll(location)),
+        Query buddy = new RangeQuery(source, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean());
+        Query original = new BoolQuery(source, true,
+            new NestedQuery(source, path, emptyMap(), new MatchAll(source)),
             buddy);
-        Query expected = new BoolQuery(location, true,
-            new NestedQuery(location, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
-                    new MatchAll(location)),
+        Query expected = new BoolQuery(source, true,
+            new NestedQuery(source, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
+                    new MatchAll(source)),
             buddy);
-        assertEquals(expected, QueryContainer.rewriteToContainNestedField(original, location, path, name, format, hasDocValues));
+        assertEquals(expected, QueryContainer.rewriteToContainNestedField(original, source, path, name, format, hasDocValues));
     }
 
     public void testRewriteToContainsNestedFieldWhenDoesNotContainNestedFieldAndCantAdd() {
-        Query original = new RangeQuery(location, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean());
-        Query expected = new BoolQuery(location, true,
+        Query original = new RangeQuery(source, randomAlphaOfLength(5), 0, randomBoolean(), 100, randomBoolean());
+        Query expected = new BoolQuery(source, true,
             original,
-            new NestedQuery(location, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
-                    new MatchAll(location)));
-        assertEquals(expected, QueryContainer.rewriteToContainNestedField(original, location, path, name, format, hasDocValues));
+            new NestedQuery(source, path, singletonMap(name, new SimpleImmutableEntry<>(hasDocValues, format)),
+                    new MatchAll(source)));
+        assertEquals(expected, QueryContainer.rewriteToContainNestedField(original, source, path, name, format, hasDocValues));
+    }
+
+    public void testColumnMaskShouldDuplicateSameAttributes() {
+
+        EsField esField = new EsField("str", DataType.TEXT, emptyMap(), true);
+
+        Attribute first = new FieldAttribute(Source.EMPTY, "first", esField);
+        Attribute second = new FieldAttribute(Source.EMPTY, "second", esField);
+        Attribute third = new FieldAttribute(Source.EMPTY, "third", esField);
+        Attribute fourth = new FieldAttribute(Source.EMPTY, "fourth", esField);
+        Alias firstAliased = new Alias(Source.EMPTY, "firstAliased", first);
+
+        Map<ExpressionId,Attribute> aliasesMap = new LinkedHashMap<>();
+        aliasesMap.put(firstAliased.id(), first);
+
+        QueryContainer queryContainer = new QueryContainer()
+            .withAliases(aliasesMap)
+            .addColumn(third)
+            .addColumn(first)
+            .addColumn(fourth)
+            .addColumn(firstAliased.toAttribute())
+            .addColumn(second)
+            .addColumn(first)
+            .addColumn(fourth);
+
+        BitSet result = queryContainer.columnMask(Arrays.asList(
+            first,
+            first,
+            second,
+            third,
+            firstAliased.toAttribute()
+        ));
+
+        BitSet expected = new BitSet();
+        expected.set(0, true);
+        expected.set(1, true);
+        expected.set(2, false);
+        expected.set(3, true);
+        expected.set(4, true);
+        expected.set(5, true);
+        expected.set(6, false);
+
+
+        assertEquals(expected, result);
     }
 }

@@ -7,16 +7,13 @@ package org.elasticsearch.xpack.sql.qa.jdbc;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
 
-import org.elasticsearch.test.junit.annotations.TestLogging;
-
 import java.util.List;
 
-@TestLogging(JdbcTestUtils.SQL_TRACE)
 public abstract class DebugSqlSpec extends SqlSpecTestCase {
     @ParametersFactory(shuffle = false, argumentFormatting = PARAM_FORMATTING)
     public static List<Object[]> readScriptSpec() throws Exception {
         Parser parser = specParser();
-        return readScriptSpec("/debug.sql-spec", parser);
+        return readScriptSpec("/datetime.sql-spec", parser);
     }
 
     public DebugSqlSpec(String fileName, String groupName, String testName, Integer lineNumber, String query) {

@@ -5,6 +5,7 @@
  */
 package org.elasticsearch.xpack.ml.job.persistence;
 
+import org.apache.lucene.search.TotalHits;
 import org.elasticsearch.action.ActionFuture;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthRequestBuilder;
@@ -16,8 +17,6 @@ import org.elasticsearch.action.admin.indices.create.CreateIndexRequestBuilder;
 import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexAction;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequest;
-import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsRequest;
-import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsResponse;
 import org.elasticsearch.action.admin.indices.mapping.get.GetMappingsRequestBuilder;
 import org.elasticsearch.action.admin.indices.mapping.get.GetMappingsResponse;
 import org.elasticsearch.action.admin.indices.mapping.put.PutMappingRequestBuilder;
@@ -27,23 +26,25 @@ import org.elasticsearch.action.bulk.BulkRequestBuilder;
 import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.get.GetRequestBuilder;
 import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.action.index.IndexRequestBuilder;
-import org.elasticsearch.action.index.IndexResponse;
+import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchRequestBuilder;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.search.SearchScrollRequestBuilder;
 import org.elasticsearch.action.support.PlainActionFuture;
-import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.client.AdminClient;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.ClusterAdminClient;
 import org.elasticsearch.client.IndicesAdminClient;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.document.DocumentField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.sort.SortBuilder;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -52,6 +53,8 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -117,31 +120,15 @@ public class MockClientBuilder {
         return this;
     }
 
-    @SuppressWarnings({ "rawtypes", "unchecked" })
-    public MockClientBuilder addIndicesExistsResponse(String index, boolean exists) throws InterruptedException, ExecutionException {
-        ActionFuture actionFuture = mock(ActionFuture.class);
-        ArgumentCaptor<IndicesExistsRequest> requestCaptor = ArgumentCaptor.forClass(IndicesExistsRequest.class);
-
-        when(indicesAdminClient.exists(requestCaptor.capture())).thenReturn(actionFuture);
-        doAnswer(invocation -> {
-            IndicesExistsRequest request = (IndicesExistsRequest) invocation.getArguments()[0];
-            return request.indices()[0].equals(index) ? actionFuture : null;
-        }).when(indicesAdminClient).exists(any(IndicesExistsRequest.class));
-        when(actionFuture.get()).thenReturn(new IndicesExistsResponse(exists));
-        when(actionFuture.actionGet()).thenReturn(new IndicesExistsResponse(exists));
-        return this;
-    }
-
     @SuppressWarnings({ "unchecked" })
     public MockClientBuilder addIndicesDeleteResponse(String index, boolean exists, boolean exception,
             ActionListener<AcknowledgedResponse> actionListener) throws InterruptedException, ExecutionException, IOException {
-        AcknowledgedResponse response = DeleteIndexAction.INSTANCE.newResponse();
         StreamInput si = mock(StreamInput.class);
         // this looks complicated but Mockito can't mock the final method
         // DeleteIndexResponse.isAcknowledged() and the only way to create
         // one with a true response is reading from a stream.
         when(si.readByte()).thenReturn((byte) 0x01);
-        response.readFrom(si);
+        AcknowledgedResponse response = DeleteIndexAction.INSTANCE.getResponseReader().read(si);
 
         doAnswer(invocation -> {
             DeleteIndexRequest deleteIndexRequest = (DeleteIndexRequest) invocation.getArguments()[0];
@@ -156,11 +143,25 @@ public class MockClientBuilder {
         return this;
     }
 
-    public MockClientBuilder prepareGet(String index, String type, String id, GetResponse response) {
+    public MockClientBuilder prepareGet(String index, String id, GetResponse response) {
         GetRequestBuilder getRequestBuilder = mock(GetRequestBuilder.class);
         when(getRequestBuilder.get()).thenReturn(response);
         when(getRequestBuilder.setFetchSource(false)).thenReturn(getRequestBuilder);
-        when(client.prepareGet(index, type, id)).thenReturn(getRequestBuilder);
+        when(client.prepareGet(index, id)).thenReturn(getRequestBuilder);
+        return this;
+    }
+
+    @SuppressWarnings("unchecked")
+    public MockClientBuilder get(GetResponse response) {
+        doAnswer(new Answer<Void>() {
+            @Override
+            public Void answer(InvocationOnMock invocationOnMock) {
+                ActionListener<GetResponse> listener = (ActionListener<GetResponse>) invocationOnMock.getArguments()[1];
+                listener.onResponse(response);
+                return null;
+            }
+        }).when(client).get(any(), any());
+
         return this;
     }
 
@@ -188,7 +189,6 @@ public class MockClientBuilder {
     @SuppressWarnings("unchecked")
     public MockClientBuilder prepareSearchExecuteListener(String index, SearchResponse response) {
         SearchRequestBuilder builder = mock(SearchRequestBuilder.class);
-        when(builder.setTypes(anyString())).thenReturn(builder);
         when(builder.addSort(any(SortBuilder.class))).thenReturn(builder);
         when(builder.setFetchSource(anyBoolean())).thenReturn(builder);
         when(builder.setScroll(anyString())).thenReturn(builder);
@@ -232,10 +232,9 @@ public class MockClientBuilder {
         return this;
     }
 
-    public MockClientBuilder prepareSearch(String index, String type, int from, int size, SearchResponse response,
+    public MockClientBuilder prepareSearch(String index, int from, int size, SearchResponse response,
             ArgumentCaptor<QueryBuilder> filter) {
         SearchRequestBuilder builder = mock(SearchRequestBuilder.class);
-        when(builder.setTypes(eq(type))).thenReturn(builder);
         when(builder.addSort(any(SortBuilder.class))).thenReturn(builder);
         when(builder.setQuery(filter.capture())).thenReturn(builder);
         when(builder.setPostFilter(filter.capture())).thenReturn(builder);
@@ -250,36 +249,87 @@ public class MockClientBuilder {
         return this;
     }
 
-    public MockClientBuilder prepareSearchAnySize(String index, String type, SearchResponse response, ArgumentCaptor<QueryBuilder> filter) {
-        SearchRequestBuilder builder = mock(SearchRequestBuilder.class);
-        when(builder.setTypes(eq(type))).thenReturn(builder);
-        when(builder.addSort(any(SortBuilder.class))).thenReturn(builder);
-        when(builder.setQuery(filter.capture())).thenReturn(builder);
-        when(builder.setPostFilter(filter.capture())).thenReturn(builder);
-        when(builder.setFrom(any(Integer.class))).thenReturn(builder);
-        when(builder.setSize(any(Integer.class))).thenReturn(builder);
-        when(builder.setFetchSource(eq(true))).thenReturn(builder);
-        when(builder.addDocValueField(any(String.class))).thenReturn(builder);
-        when(builder.addDocValueField(any(String.class), any(String.class))).thenReturn(builder);
-        when(builder.addSort(any(String.class), any(SortOrder.class))).thenReturn(builder);
-        when(builder.get()).thenReturn(response);
-        when(client.prepareSearch(eq(index))).thenReturn(builder);
+    public MockClientBuilder prepareSearches(String index, SearchRequestBuilder first, SearchRequestBuilder... searches) {
+        when(client.prepareSearch(eq(index))).thenReturn(first, searches);
         return this;
     }
 
+    /**
+     * Creates a {@link SearchResponse} with a {@link SearchHit} for each element of {@code docs}
+     * @param indexName Index being searched
+     * @param docs Returned in the SearchResponse
+     * @return this
+     */
     @SuppressWarnings("unchecked")
-    public MockClientBuilder prepareIndex(String index, String type, String responseId, ArgumentCaptor<XContentBuilder> getSource) {
-        IndexRequestBuilder builder = mock(IndexRequestBuilder.class);
-        PlainActionFuture<IndexResponse> actionFuture = mock(PlainActionFuture.class);
-        IndexResponse response = mock(IndexResponse.class);
-        when(response.getId()).thenReturn(responseId);
+    public MockClientBuilder prepareSearch(String indexName, List<BytesReference> docs) {
+        SearchRequestBuilder builder = mock(SearchRequestBuilder.class);
+        when(builder.setIndicesOptions(any())).thenReturn(builder);
+        when(builder.setQuery(any())).thenReturn(builder);
+        when(builder.setSource(any())).thenReturn(builder);
+        when(builder.setSize(anyInt())).thenReturn(builder);
+        SearchRequest request = new SearchRequest(indexName);
+        when(builder.request()).thenReturn(request);
 
-        when(client.prepareIndex(eq(index), eq(type))).thenReturn(builder);
-        when(client.prepareIndex(eq(index), eq(type), any(String.class))).thenReturn(builder);
-        when(builder.setSource(getSource.capture())).thenReturn(builder);
-        when(builder.setRefreshPolicy(eq(RefreshPolicy.IMMEDIATE))).thenReturn(builder);
-        when(builder.execute()).thenReturn(actionFuture);
-        when(actionFuture.actionGet()).thenReturn(response);
+        when(client.prepareSearch(eq(indexName))).thenReturn(builder);
+
+        SearchHit hits [] = new SearchHit[docs.size()];
+        for (int i=0; i<docs.size(); i++) {
+            SearchHit hit = new SearchHit(10);
+            hit.sourceRef(docs.get(i));
+            hits[i] = hit;
+        }
+
+        SearchResponse response = mock(SearchResponse.class);
+        SearchHits searchHits = new SearchHits(hits, new TotalHits(hits.length, TotalHits.Relation.EQUAL_TO), 0.0f);
+        when(response.getHits()).thenReturn(searchHits);
+
+        doAnswer(new Answer<Void>() {
+            @Override
+            public Void answer(InvocationOnMock invocationOnMock) {
+                ActionListener<SearchResponse> listener = (ActionListener<SearchResponse>) invocationOnMock.getArguments()[1];
+                listener.onResponse(response);
+                return null;
+            }
+        }).when(client).search(eq(request), any());
+
+        return this;
+    }
+
+    /*
+     * Mock a search that returns search hits with fields.
+     * The number of hits is the size of fields
+     */
+    @SuppressWarnings("unchecked")
+    public MockClientBuilder prepareSearchFields(String indexName, List<Map<String, DocumentField>> fields) {
+        SearchRequestBuilder builder = mock(SearchRequestBuilder.class);
+        when(builder.setIndicesOptions(any())).thenReturn(builder);
+        when(builder.setQuery(any())).thenReturn(builder);
+        when(builder.setSource(any())).thenReturn(builder);
+        when(builder.setSize(anyInt())).thenReturn(builder);
+        SearchRequest request = new SearchRequest(indexName);
+        when(builder.request()).thenReturn(request);
+
+        when(client.prepareSearch(eq(indexName))).thenReturn(builder);
+
+        SearchHit hits [] = new SearchHit[fields.size()];
+        for (int i=0; i<hits.length; i++) {
+            SearchHit hit = new SearchHit(10, null, null, fields.get(i));
+            hits[i] = hit;
+        }
+
+        SearchResponse response = mock(SearchResponse.class);
+        SearchHits searchHits = new SearchHits(hits, new TotalHits(hits.length, TotalHits.Relation.EQUAL_TO), 0.0f);
+        when(response.getHits()).thenReturn(searchHits);
+
+        doAnswer(new Answer<Void>() {
+            @Override
+            public Void answer(InvocationOnMock invocationOnMock) {
+                ActionListener<SearchResponse> listener = (ActionListener<SearchResponse>) invocationOnMock.getArguments()[1];
+                listener.onResponse(response);
+                return null;
+            }
+        }).when(client).search(eq(request), any());
+
         return this;
     }
 
@@ -333,6 +383,7 @@ public class MockClientBuilder {
         return this;
     }
 
+    @SuppressWarnings("unchecked")
     public MockClientBuilder preparePutMapping(AcknowledgedResponse response, String type) {
         PutMappingRequestBuilder requestBuilder = mock(PutMappingRequestBuilder.class);
         when(requestBuilder.setType(eq(type))).thenReturn(requestBuilder);
@@ -351,6 +402,7 @@ public class MockClientBuilder {
         return this;
     }
 
+    @SuppressWarnings("unchecked")
     public MockClientBuilder prepareGetMapping(GetMappingsResponse response) {
         GetMappingsRequestBuilder builder = mock(GetMappingsRequestBuilder.class);
 
@@ -368,6 +420,7 @@ public class MockClientBuilder {
         return this;
     }
 
+    @SuppressWarnings("unchecked")
     public MockClientBuilder putTemplate(ArgumentCaptor<PutIndexTemplateRequest> requestCaptor) {
         doAnswer(new Answer<Void>() {
             @Override

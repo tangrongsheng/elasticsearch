@@ -64,16 +64,18 @@ public class IngestStats implements Writeable, ToXContentFragment {
             String pipelineId = in.readString();
             Stats pipelineStat = new Stats(in);
             this.pipelineStats.add(new PipelineStat(pipelineId, pipelineStat));
-            if (in.getVersion().onOrAfter(Version.V_6_5_0)) {
-                int processorsSize = in.readVInt();
-                List<ProcessorStat> processorStatsPerPipeline = new ArrayList<>(processorsSize);
-                for (int j = 0; j < processorsSize; j++) {
-                    String processorName = in.readString();
-                    Stats processorStat = new Stats(in);
-                    processorStatsPerPipeline.add(new ProcessorStat(processorName, processorStat));
+            int processorsSize = in.readVInt();
+            List<ProcessorStat> processorStatsPerPipeline = new ArrayList<>(processorsSize);
+            for (int j = 0; j < processorsSize; j++) {
+                String processorName = in.readString();
+                String processorType = "_NOT_AVAILABLE";
+                if (in.getVersion().onOrAfter(Version.V_7_6_0)) {
+                    processorType = in.readString();
                 }
-                this.processorStats.put(pipelineId, processorStatsPerPipeline);
+                Stats processorStat = new Stats(in);
+                processorStatsPerPipeline.add(new ProcessorStat(processorName, processorType, processorStat));
             }
+            this.processorStats.put(pipelineId, processorStatsPerPipeline);
         }
     }
 
@@ -84,16 +86,17 @@ public class IngestStats implements Writeable, ToXContentFragment {
         for (PipelineStat pipelineStat : pipelineStats) {
             out.writeString(pipelineStat.getPipelineId());
             pipelineStat.getStats().writeTo(out);
-            if (out.getVersion().onOrAfter(Version.V_6_5_0)) {
-                List<ProcessorStat> processorStatsForPipeline = processorStats.get(pipelineStat.getPipelineId());
-                if (processorStatsForPipeline == null) {
-                    out.writeVInt(0);
-                } else {
-                    out.writeVInt(processorStatsForPipeline.size());
-                    for (ProcessorStat processorStat : processorStatsForPipeline) {
-                        out.writeString(processorStat.getName());
-                        processorStat.getStats().writeTo(out);
+            List<ProcessorStat> processorStatsForPipeline = processorStats.get(pipelineStat.getPipelineId());
+            if (processorStatsForPipeline == null) {
+                out.writeVInt(0);
+            } else {
+                out.writeVInt(processorStatsForPipeline.size());
+                for (ProcessorStat processorStat : processorStatsForPipeline) {
+                    out.writeString(processorStat.getName());
+                    if (out.getVersion().onOrAfter(Version.V_7_6_0)) {
+                        out.writeString(processorStat.getType());
                     }
+                    processorStat.getStats().writeTo(out);
                 }
             }
         }
@@ -115,7 +118,10 @@ public class IngestStats implements Writeable, ToXContentFragment {
                 for (ProcessorStat processorStat : processorStatsForPipeline) {
                     builder.startObject();
                     builder.startObject(processorStat.getName());
+                    builder.field("type", processorStat.getType());
+                    builder.startObject("stats");
                     processorStat.getStats().toXContent(builder, params);
+                    builder.endObject();
                     builder.endObject();
                     builder.endObject();
                 }
@@ -229,9 +235,9 @@ public class IngestStats implements Writeable, ToXContentFragment {
             return this;
         }
 
-        Builder addProcessorMetrics(String pipelineId, String processorName, IngestMetric metric) {
+        Builder addProcessorMetrics(String pipelineId, String processorName, String processorType, IngestMetric metric) {
             this.processorStats.computeIfAbsent(pipelineId, k -> new ArrayList<>())
-                .add(new ProcessorStat(processorName, metric.createStats()));
+                .add(new ProcessorStat(processorName, processorType, metric.createStats()));
             return this;
         }
 
@@ -267,15 +273,21 @@ public class IngestStats implements Writeable, ToXContentFragment {
      */
     public static class ProcessorStat {
         private final String name;
+        private final String type;
         private final Stats stats;
 
-        public ProcessorStat(String name, Stats stats) {
+        public ProcessorStat(String name, String type, Stats stats) {
             this.name = name;
+            this.type = type;
             this.stats = stats;
         }
 
         public String getName() {
             return name;
+        }
+
+        public String getType() {
+            return type;
         }
 
         public Stats getStats() {

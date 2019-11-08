@@ -19,6 +19,8 @@
 
 package org.elasticsearch.painless.spi;
 
+import org.elasticsearch.painless.spi.annotation.WhitelistAnnotationParser;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -48,12 +50,12 @@ public final class Whitelist {
         "java.util.txt",
         "java.util.function.txt",
         "java.util.regex.txt",
-        "java.util.stream.txt",
-        "joda.time.txt"
+        "java.util.stream.txt"
     };
 
     public static final List<Whitelist> BASE_WHITELISTS =
-        Collections.singletonList(WhitelistLoader.loadFromResourceFiles(Whitelist.class, BASE_WHITELIST_FILES));
+            Collections.singletonList(WhitelistLoader.loadFromResourceFiles(
+                    Whitelist.class, WhitelistAnnotationParser.BASE_ANNOTATION_PARSERS, BASE_WHITELIST_FILES));
 
     /** The {@link ClassLoader} used to look up the whitelisted Java classes, constructors, methods, and fields. */
     public final ClassLoader classLoader;

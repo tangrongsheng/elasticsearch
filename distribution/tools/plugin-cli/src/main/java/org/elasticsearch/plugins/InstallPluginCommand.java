@@ -23,8 +23,9 @@ import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
 import org.apache.lucene.search.spell.LevenshteinDistance;
 import org.apache.lucene.util.CollectionUtil;
+import org.apache.lucene.util.Constants;
 import org.bouncycastle.bcpg.ArmoredInputStream;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPPublicKey;
 import org.bouncycastle.openpgp.PGPPublicKeyRingCollection;
@@ -44,6 +45,8 @@ import org.elasticsearch.cli.UserException;
 import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.hash.MessageDigests;
+import org.elasticsearch.common.io.Streams;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.env.Environment;
 
@@ -52,6 +55,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -82,7 +86,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -130,36 +133,28 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     static final int PLUGIN_MALFORMED = 2;
 
     /** The builtin modules, which are plugins, but cannot be installed or removed. */
-    static final Set<String> MODULES;
+    private static final Set<String> MODULES;
     static {
-        try (InputStream stream = InstallPluginCommand.class.getResourceAsStream("/modules.txt");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            Set<String> modules = new HashSet<>();
-            String line = reader.readLine();
-            while (line != null) {
-                modules.add(line.trim());
-                line = reader.readLine();
-            }
-            MODULES = Collections.unmodifiableSet(modules);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        try (var stream = InstallPluginCommand.class.getResourceAsStream("/modules.txt")) {
+            MODULES = Streams.readAllLines(stream)
+                .stream()
+                .map(String::trim)
+                .collect(Collectors.toUnmodifiableSet());
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
     /** The official plugins that can be installed simply by name. */
     static final Set<String> OFFICIAL_PLUGINS;
     static {
-        try (InputStream stream = InstallPluginCommand.class.getResourceAsStream("/plugins.txt");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            Set<String> plugins = new TreeSet<>(); // use tree set to get sorting for help command
-            String line = reader.readLine();
-            while (line != null) {
-                plugins.add(line.trim());
-                line = reader.readLine();
-            }
-            OFFICIAL_PLUGINS = Collections.unmodifiableSet(plugins);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+        try (var stream = InstallPluginCommand.class.getResourceAsStream("/plugins.txt")) {
+            OFFICIAL_PLUGINS = Streams.readAllLines(stream)
+                .stream()
+                .map(String::trim)
+                .collect(Sets.toUnmodifiableSortedSet());
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -226,7 +221,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
             handleInstallXPack(buildFlavor());
         }
 
-        Path pluginZip = download(terminal, pluginId, env.tmpFile());
+        Path pluginZip = download(terminal, pluginId, env.tmpFile(), isBatch);
         Path extractedZip = unzip(pluginZip, env.pluginsFile());
         install(terminal, isBatch, extractedZip, env);
     }
@@ -249,11 +244,11 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     }
 
     /** Downloads the plugin and returns the file it was downloaded to. */
-    private Path download(Terminal terminal, String pluginId, Path tmpDir) throws Exception {
+    private Path download(Terminal terminal, String pluginId, Path tmpDir, boolean isBatch) throws Exception {
         if (OFFICIAL_PLUGINS.contains(pluginId)) {
             final String url = getElasticUrl(terminal, getStagingHash(), Version.CURRENT, isSnapshot(), pluginId, Platforms.PLATFORM_NAME);
             terminal.println("-> Downloading " + pluginId + " from elastic");
-            return downloadAndValidate(terminal, url, tmpDir, true);
+            return downloadAndValidate(terminal, url, tmpDir, true, isBatch);
         }
 
         // now try as maven coordinates, a valid URL would only have a colon and slash
@@ -261,7 +256,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         if (coordinates.length == 3 && pluginId.contains("/") == false && pluginId.startsWith("file:") == false) {
             String mavenUrl = getMavenUrl(terminal, coordinates, Platforms.PLATFORM_NAME);
             terminal.println("-> Downloading " + pluginId + " from maven central");
-            return downloadAndValidate(terminal, mavenUrl, tmpDir, false);
+            return downloadAndValidate(terminal, mavenUrl, tmpDir, false, isBatch);
         }
 
         // fall back to plain old URL
@@ -275,7 +270,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
             throw new UserException(ExitCodes.USAGE, msg);
         }
         terminal.println("-> Downloading " + URLDecoder.decode(pluginId, "UTF-8"));
-        return downloadZip(terminal, pluginId, tmpDir);
+        return downloadZip(terminal, pluginId, tmpDir, isBatch);
     }
 
     // pkg private so tests can override
@@ -370,14 +365,14 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     /** Downloads a zip from the url, into a temp file under the given temp dir. */
     // pkg private for tests
     @SuppressForbidden(reason = "We use getInputStream to download plugins")
-    Path downloadZip(Terminal terminal, String urlString, Path tmpDir) throws IOException {
+    Path downloadZip(Terminal terminal, String urlString, Path tmpDir, boolean isBatch) throws IOException {
         terminal.println(VERBOSE, "Retrieving zip from " + urlString);
         URL url = new URL(urlString);
         Path zip = Files.createTempFile(tmpDir, null, ".zip");
         URLConnection urlConnection = url.openConnection();
         urlConnection.addRequestProperty("User-Agent", "elasticsearch-plugin-installer");
-        int contentLength = urlConnection.getContentLength();
-        try (InputStream in = new TerminalProgressInputStream(urlConnection.getInputStream(), contentLength, terminal)) {
+        try (InputStream in = isBatch ? urlConnection.getInputStream() :
+            new TerminalProgressInputStream(urlConnection.getInputStream(),urlConnection.getContentLength(),terminal)) {
             // must overwrite since creating the temp file above actually created the file
             Files.copy(in, zip, StandardCopyOption.REPLACE_EXISTING);
         }
@@ -440,17 +435,18 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
      * @param urlString      the URL of the plugin ZIP
      * @param tmpDir         a temporary directory to write downloaded files to
      * @param officialPlugin true if the plugin is an official plugin
+     * @param isBatch        true if the install is running in batch mode
      * @return the path to the downloaded plugin ZIP
      * @throws IOException   if an I/O exception occurs download or reading files and resources
      * @throws PGPException  if an exception occurs verifying the downloaded ZIP signature
      * @throws UserException if checksum validation fails
      */
     private Path downloadAndValidate(
-            final Terminal terminal,
-            final String urlString,
-            final Path tmpDir,
-            final boolean officialPlugin) throws IOException, PGPException, UserException {
-        Path zip = downloadZip(terminal, urlString, tmpDir);
+        final Terminal terminal,
+        final String urlString,
+        final Path tmpDir,
+        final boolean officialPlugin, boolean isBatch) throws IOException, PGPException, UserException {
+        Path zip = downloadZip(terminal, urlString, tmpDir, isBatch);
         pathsToDeleteOnShutdown.add(zip);
         String checksumUrlString = urlString + ".sha512";
         URL checksumUrl = openUrl(checksumUrlString);
@@ -505,17 +501,26 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
             }
         }
 
-        try {
-            final byte[] zipBytes = Files.readAllBytes(zip);
-            final String actualChecksum = MessageDigests.toHexString(MessageDigest.getInstance(digestAlgo).digest(zipBytes));
-            if (expectedChecksum.equals(actualChecksum) == false) {
-                throw new UserException(
+        // read the bytes of the plugin zip in chunks to avoid out of memory errors
+        try (InputStream zis = Files.newInputStream(zip)) {
+            try {
+                final MessageDigest digest = MessageDigest.getInstance(digestAlgo);
+                final byte[] bytes = new byte[8192];
+                int read;
+                while ((read = zis.read(bytes)) != -1) {
+                    assert read > 0 : read;
+                    digest.update(bytes, 0, read);
+                }
+                final String actualChecksum = MessageDigests.toHexString(digest.digest());
+                if (expectedChecksum.equals(actualChecksum) == false) {
+                    throw new UserException(
                         ExitCodes.IO_ERROR,
                         digestAlgo + " mismatch, expected " + expectedChecksum + " but got " + actualChecksum);
+                }
+            } catch (final NoSuchAlgorithmException e) {
+                // this should never happen as we are using SHA-1 and SHA-512 here
+                throw new AssertionError(e);
             }
-        } catch (final NoSuchAlgorithmException e) {
-            // this should never happen as we are using SHA-1 and SHA-512 here
-            throw new AssertionError(e);
         }
 
         if (officialPlugin) {
@@ -556,7 +561,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
             // compute the signature of the downloaded plugin zip
             final PGPPublicKeyRingCollection collection = new PGPPublicKeyRingCollection(ain, new JcaKeyFingerprintCalculator());
             final PGPPublicKey key = collection.getPublicKey(signature.getKeyID());
-            signature.init(new JcaPGPContentVerifierBuilderProvider().setProvider(new BouncyCastleProvider()), key);
+            signature.init(new JcaPGPContentVerifierBuilderProvider().setProvider(new BouncyCastleFipsProvider()), key);
             final byte[] buffer = new byte[1024];
             int read;
             while ((read = fin.read(buffer)) != -1) {
@@ -702,7 +707,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
                 Locale.ROOT,
                 "plugin directory [%s] already exists; if you need to update the plugin, " +
                     "uninstall it first using command 'remove %s'",
-                destination.toAbsolutePath(),
+                destination,
                 pluginName);
             throw new UserException(PLUGIN_EXISTS, message);
         }
@@ -832,7 +837,10 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         Files.walkFileTree(destination, new SimpleFileVisitor<Path>() {
             @Override
             public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) throws IOException {
-                if ("bin".equals(file.getParent().getFileName().toString())) {
+                final String parentDirName = file.getParent().getFileName().toString();
+                if ("bin".equals(parentDirName)
+                    // "MacOS" is an alternative to "bin" on macOS
+                    || (Constants.MAC_OS_X && "MacOS".equals(parentDirName))) {
                     setFileAttributes(file, BIN_FILES_PERMS);
                 } else {
                     setFileAttributes(file, PLUGIN_FILES_PERMS);

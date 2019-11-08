@@ -6,30 +6,30 @@
 package org.elasticsearch.xpack.sql.expression;
 
 import org.elasticsearch.xpack.sql.expression.gen.pipeline.Pipe;
-import org.elasticsearch.xpack.sql.tree.Location;
 import org.elasticsearch.xpack.sql.tree.NodeInfo;
+import org.elasticsearch.xpack.sql.tree.Source;
 import org.elasticsearch.xpack.sql.type.DataType;
 
 public class LiteralAttribute extends TypedAttribute {
 
     private final Literal literal;
 
-    public LiteralAttribute(Location location, String name, String qualifier, boolean nullable, ExpressionId id, boolean synthetic,
-            DataType dataType, Literal literal) {
-        super(location, name, dataType, qualifier, nullable, id, synthetic);
+    public LiteralAttribute(Source source, String name, DataType dataType, String qualifier, Nullability nullability, ExpressionId id,
+                            boolean synthetic, Literal literal) {
+        super(source, name, dataType, qualifier, nullability, id, synthetic);
         this.literal = literal;
     }
 
     @Override
     protected NodeInfo<LiteralAttribute> info() {
         return NodeInfo.create(this, LiteralAttribute::new,
-            name(), qualifier(), nullable(), id(), synthetic(), dataType(), literal);
+                name(), dataType(), qualifier(), nullable(), id(), synthetic(), literal);
     }
 
     @Override
-    protected LiteralAttribute clone(Location location, String name, String qualifier, boolean nullable,
+    protected LiteralAttribute clone(Source source, String name, DataType dataType, String qualifier, Nullability nullability,
                                      ExpressionId id, boolean synthetic) {
-        return new LiteralAttribute(location, name, qualifier, nullable, id, synthetic, dataType(), literal);
+        return new LiteralAttribute(source, name, dataType, qualifier, nullability, id, synthetic, literal);
     }
 
     @Override
@@ -40,5 +40,10 @@ public class LiteralAttribute extends TypedAttribute {
     @Override
     public Pipe asPipe() {
         return literal.asPipe();
+    }
+    
+    @Override
+    public Object fold() {
+        return literal.fold();
     }
 }

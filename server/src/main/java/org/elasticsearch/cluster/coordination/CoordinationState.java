@@ -24,13 +24,14 @@ import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.coordination.CoordinationMetaData.VotingConfiguration;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.common.settings.Settings;
 
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The core class of the cluster state coordination algorithm, directly implementing the
@@ -41,6 +42,8 @@ public class CoordinationState {
     private static final Logger logger = LogManager.getLogger(CoordinationState.class);
 
     private final DiscoveryNode localNode;
+
+    private final ElectionStrategy electionStrategy;
 
     // persisted state
     private final PersistedState persistedState;
@@ -53,11 +56,12 @@ public class CoordinationState {
     private VotingConfiguration lastPublishedConfiguration;
     private VoteCollection publishVotes;
 
-    public CoordinationState(Settings settings, DiscoveryNode localNode, PersistedState persistedState) {
+    public CoordinationState(DiscoveryNode localNode, PersistedState persistedState, ElectionStrategy electionStrategy) {
         this.localNode = localNode;
 
         // persisted state
         this.persistedState = persistedState;
+        this.electionStrategy = electionStrategy;
 
         // transient state
         this.joinVotes = new VoteCollection();
@@ -100,13 +104,9 @@ public class CoordinationState {
         return electionWon;
     }
 
-    public boolean isElectionQuorum(VoteCollection votes) {
-        return isElectionQuorum(votes, getLastAcceptedState());
-    }
-
-    static boolean isElectionQuorum(VoteCollection votes, ClusterState lastAcceptedState) {
-        return votes.isQuorum(lastAcceptedState.getLastCommittedConfiguration())
-            && votes.isQuorum(lastAcceptedState.getLastAcceptedConfiguration());
+    public boolean isElectionQuorum(VoteCollection joinVotes) {
+        return electionStrategy.isElectionQuorum(localNode, getCurrentTerm(), getLastAcceptedTerm(), getLastAcceptedVersion(),
+            getLastCommittedConfiguration(), getLastAcceptedConfiguration(), joinVotes);
     }
 
     public boolean isPublishQuorum(VoteCollection votes) {
@@ -117,6 +117,11 @@ public class CoordinationState {
         return joinVotes.containsVoteFor(node);
     }
 
+    // used for tests
+    boolean containsJoin(Join join) {
+        return joinVotes.getJoins().contains(join);
+    }
+
     public boolean joinVotesHaveQuorumFor(VotingConfiguration votingConfiguration) {
         return joinVotes.isQuorum(votingConfiguration);
     }
@@ -124,27 +129,29 @@ public class CoordinationState {
     /**
      * Used to bootstrap a cluster by injecting the initial state and configuration.
      *
-     * @param initialState The initial state to use. Must have term 0, version 1, and non-empty configurations.
+     * @param initialState The initial state to use. Must have term 0, version equal to the last-accepted version, and non-empty
+     *                     configurations.
      * @throws CoordinationStateRejectedException if the arguments were incompatible with the current state of this object.
      */
     public void setInitialState(ClusterState initialState) {
-        final long lastAcceptedVersion = getLastAcceptedVersion();
-        if (lastAcceptedVersion != 0) {
-            logger.debug("setInitialState: rejecting since last-accepted version {} > 0", lastAcceptedVersion);
-            throw new CoordinationStateRejectedException("initial state already set: last-accepted version now " + lastAcceptedVersion);
+
+        final VotingConfiguration lastAcceptedConfiguration = getLastAcceptedConfiguration();
+        if (lastAcceptedConfiguration.isEmpty() == false) {
+            logger.debug("setInitialState: rejecting since last-accepted configuration is nonempty: {}", lastAcceptedConfiguration);
+            throw new CoordinationStateRejectedException(
+                "initial state already set: last-accepted configuration now " + lastAcceptedConfiguration);
         }
 
         assert getLastAcceptedTerm() == 0 : getLastAcceptedTerm();
-        assert getLastAcceptedConfiguration().isEmpty() : getLastAcceptedConfiguration();
         assert getLastCommittedConfiguration().isEmpty() : getLastCommittedConfiguration();
-        assert lastPublishedVersion == 0 : lastAcceptedVersion;
+        assert lastPublishedVersion == 0 : lastPublishedVersion;
         assert lastPublishedConfiguration.isEmpty() : lastPublishedConfiguration;
         assert electionWon == false;
         assert joinVotes.isEmpty() : joinVotes;
         assert publishVotes.isEmpty() : publishVotes;
 
-        assert initialState.term() == 0 : initialState;
-        assert initialState.version() == 1 : initialState;
+        assert initialState.term() == 0 : initialState + " should have term 0";
+        assert initialState.version() == getLastAcceptedVersion() : initialState + " should have version " + getLastAcceptedVersion();
         assert initialState.getLastAcceptedConfiguration().isEmpty() == false;
         assert initialState.getLastCommittedConfiguration().isEmpty() == false;
 
@@ -189,7 +196,8 @@ public class CoordinationState {
         joinVotes = new VoteCollection();
         publishVotes = new VoteCollection();
 
-        return new Join(localNode, startJoinRequest.getSourceNode(), getCurrentTerm(), getLastAcceptedTerm(), getLastAcceptedVersion());
+        return new Join(localNode, startJoinRequest.getSourceNode(), getCurrentTerm(), getLastAcceptedTerm(),
+            getLastAcceptedVersion());
     }
 
     /**
@@ -200,7 +208,7 @@ public class CoordinationState {
      * @throws CoordinationStateRejectedException if the arguments were incompatible with the current state of this object.
      */
     public boolean handleJoin(Join join) {
-        assert join.getTargetNode().equals(localNode) : "handling join " + join + " for the wrong node " + localNode;
+        assert join.targetMatches(localNode) : "handling join " + join + " for the wrong node " + localNode;
 
         if (join.getTerm() != getCurrentTerm()) {
             logger.debug("handleJoin: ignored join due to term mismatch (expected: [{}], actual: [{}])",
@@ -223,25 +231,28 @@ public class CoordinationState {
         }
 
         if (join.getLastAcceptedTerm() == lastAcceptedTerm && join.getLastAcceptedVersion() > getLastAcceptedVersion()) {
-            logger.debug("handleJoin: ignored join as joiner has a better last accepted version (expected: <=[{}], actual: [{}])",
-                getLastAcceptedVersion(), join.getLastAcceptedVersion());
+            logger.debug(
+                "handleJoin: ignored join as joiner has a better last accepted version (expected: <=[{}], actual: [{}]) in term {}",
+                getLastAcceptedVersion(), join.getLastAcceptedVersion(), lastAcceptedTerm);
             throw new CoordinationStateRejectedException("incoming last accepted version " + join.getLastAcceptedVersion() +
-                " of join higher than current last accepted version " + getLastAcceptedVersion());
+                " of join higher than current last accepted version " + getLastAcceptedVersion()
+                + " in term " + lastAcceptedTerm);
         }
 
-        if (getLastAcceptedVersion() == 0) {
+        if (getLastAcceptedConfiguration().isEmpty()) {
             // We do not check for an election won on setting the initial configuration, so it would be possible to end up in a state where
             // we have enough join votes to have won the election immediately on setting the initial configuration. It'd be quite
             // complicated to restore all the appropriate invariants when setting the initial configuration (it's not just electionWon)
             // so instead we just reject join votes received prior to receiving the initial configuration.
-            logger.debug("handleJoin: ignored join because initial configuration not set");
-            throw new CoordinationStateRejectedException("initial configuration not set");
+            logger.debug("handleJoin: rejecting join since this node has not received its initial configuration yet");
+            throw new CoordinationStateRejectedException("rejecting join since this node has not received its initial configuration yet");
         }
 
-        boolean added = joinVotes.addVote(join.getSourceNode());
+        boolean added = joinVotes.addJoinVote(join);
         boolean prevElectionWon = electionWon;
         electionWon = isElectionQuorum(joinVotes);
-        assert !prevElectionWon || electionWon; // we cannot go from won to not won
+        assert !prevElectionWon || electionWon : // we cannot go from won to not won
+            "locaNode= " + localNode + ", join=" + join + ", joinVotes=" + joinVotes;
         logger.debug("handleJoin: added join {} from [{}] for election, electionWon={} lastAcceptedTerm={} lastAcceptedVersion={}", join,
             join.getSourceNode(), electionWon, lastAcceptedTerm, getLastAcceptedVersion());
 
@@ -405,7 +416,7 @@ public class CoordinationState {
         logger.trace("handleCommit: applying commit request for term [{}] and version [{}]", applyCommit.getTerm(),
             applyCommit.getVersion());
 
-        persistedState.markLastAcceptedConfigAsCommitted();
+        persistedState.markLastAcceptedStateAsCommitted();
         assert getLastCommittedConfiguration().equals(getLastAcceptedConfiguration());
     }
 
@@ -419,6 +430,10 @@ public class CoordinationState {
         }
         assert electionWon() == false || startedJoinSinceLastReboot;
         assert publishVotes.isEmpty() || electionWon();
+    }
+
+    public void close() {
+        persistedState.close();
     }
 
     /**
@@ -454,33 +469,60 @@ public class CoordinationState {
         /**
          * Marks the last accepted cluster state as committed.
          * After a successful call to this method, {@link #getLastAcceptedState()} should return the last cluster state that was set,
-         * with the last committed configuration now corresponding to the last accepted configuration.
+         * with the last committed configuration now corresponding to the last accepted configuration, and the cluster uuid, if set,
+         * marked as committed.
          */
-        default void markLastAcceptedConfigAsCommitted() {
+        default void markLastAcceptedStateAsCommitted() {
             final ClusterState lastAcceptedState = getLastAcceptedState();
+            MetaData.Builder metaDataBuilder = null;
             if (lastAcceptedState.getLastAcceptedConfiguration().equals(lastAcceptedState.getLastCommittedConfiguration()) == false) {
                 final CoordinationMetaData coordinationMetaData = CoordinationMetaData.builder(lastAcceptedState.coordinationMetaData())
                         .lastCommittedConfiguration(lastAcceptedState.getLastAcceptedConfiguration())
                         .build();
-                final MetaData metaData = MetaData.builder(lastAcceptedState.metaData()).coordinationMetaData(coordinationMetaData).build();
-                setLastAcceptedState(ClusterState.builder(lastAcceptedState).metaData(metaData).build());
+                metaDataBuilder = MetaData.builder(lastAcceptedState.metaData());
+                metaDataBuilder.coordinationMetaData(coordinationMetaData);
+            }
+            assert lastAcceptedState.metaData().clusterUUID().equals(MetaData.UNKNOWN_CLUSTER_UUID) == false :
+                "received cluster state with empty cluster uuid: " + lastAcceptedState;
+            if (lastAcceptedState.metaData().clusterUUID().equals(MetaData.UNKNOWN_CLUSTER_UUID) == false &&
+                lastAcceptedState.metaData().clusterUUIDCommitted() == false) {
+                if (metaDataBuilder == null) {
+                    metaDataBuilder = MetaData.builder(lastAcceptedState.metaData());
+                }
+                metaDataBuilder.clusterUUIDCommitted(true);
+                logger.info("cluster UUID set to [{}]", lastAcceptedState.metaData().clusterUUID());
+            }
+            if (metaDataBuilder != null) {
+                setLastAcceptedState(ClusterState.builder(lastAcceptedState).metaData(metaDataBuilder).build());
             }
         }
+
+        default void close() {}
     }
 
     /**
-     * A collection of votes, used to calculate quorums.
+     * A collection of votes, used to calculate quorums. Optionally records the Joins as well.
      */
     public static class VoteCollection {
 
         private final Map<String, DiscoveryNode> nodes;
+        private final Set<Join> joins;
 
         public boolean addVote(DiscoveryNode sourceNode) {
-            return nodes.put(sourceNode.getId(), sourceNode) == null;
+            return sourceNode.isMasterNode() && nodes.put(sourceNode.getId(), sourceNode) == null;
+        }
+
+        public boolean addJoinVote(Join join) {
+            final boolean added = addVote(join.getSourceNode());
+            if (added) {
+                joins.add(join);
+            }
+            return added;
         }
 
         public VoteCollection() {
             nodes = new HashMap<>();
+            joins = new HashSet<>();
         }
 
         public boolean isQuorum(VotingConfiguration configuration) {
@@ -499,24 +541,31 @@ public class CoordinationState {
             return Collections.unmodifiableCollection(nodes.values());
         }
 
+        public Set<Join> getJoins() {
+            return Collections.unmodifiableSet(joins);
+        }
+
         @Override
         public String toString() {
-            return "VoteCollection{" + String.join(",", nodes.keySet()) + "}";
+            return "VoteCollection{votes=" + nodes.keySet() + ", joins=" + joins + "}";
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
+            if (!(o instanceof VoteCollection)) return false;
 
             VoteCollection that = (VoteCollection) o;
 
-            return nodes.equals(that.nodes);
+            if (!nodes.equals(that.nodes)) return false;
+            return joins.equals(that.joins);
         }
 
         @Override
         public int hashCode() {
-            return nodes.hashCode();
+            int result = nodes.hashCode();
+            result = 31 * result + joins.hashCode();
+            return result;
         }
     }
 }

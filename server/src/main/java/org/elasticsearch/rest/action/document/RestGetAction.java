@@ -23,7 +23,6 @@ import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
@@ -42,10 +41,9 @@ import static org.elasticsearch.rest.RestStatus.OK;
 
 public class RestGetAction extends BaseRestHandler {
 
-    public RestGetAction(final Settings settings, final RestController controller) {
-        super(settings);
-        controller.registerHandler(GET, "/{index}/{type}/{id}", this);
-        controller.registerHandler(HEAD, "/{index}/{type}/{id}", this);
+    public RestGetAction(final RestController controller) {
+        controller.registerHandler(GET, "/{index}/_doc/{id}", this);
+        controller.registerHandler(HEAD, "/{index}/_doc/{id}", this);
     }
 
     @Override
@@ -55,9 +53,8 @@ public class RestGetAction extends BaseRestHandler {
 
     @Override
     public RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
-        final GetRequest getRequest = new GetRequest(request.param("index"),
-            request.param("type"),
-            request.param("id"));
+        GetRequest getRequest = new GetRequest(request.param("index"), request.param("id"));
+
         getRequest.refresh(request.paramAsBoolean("refresh", getRequest.refresh()));
         getRequest.routing(request.param("routing"));
         getRequest.preference(request.param("preference"));

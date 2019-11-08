@@ -1,7 +1,10 @@
 [role="xpack"]
 [testenv="basic"]
 [[update-license]]
-=== Update License API
+=== Update license API
+++++
+<titleabbrev>Update license</titleabbrev>
+++++
 
 This API enables you to update your license.
 
@@ -40,19 +43,19 @@ https://www.elastic.co/subscriptions.
 [float]
 ==== Authorization
 
-If {security} is enabled, you need `manage` cluster privileges to install the
-license.
+If {es} {security-features} are enabled, you need `manage` cluster privileges to
+install the license.
 
-If {security} is enabled and you are installing a gold or platinum license, you
-must enable TLS on the transport networking layer before you install the license.
-See <<configuring-tls>>.
+If {es} {security-features} are enabled and you are installing a gold or platinum
+license, you must enable TLS on the transport networking layer before you
+install the license. See <<configuring-tls>>.
 
 [float]
 ==== Examples
 
 The following example updates to a basic license:
 
-[source,js]
+[source,console]
 ------------------------------------------------------------
 POST /_license
 {
@@ -70,26 +73,25 @@ POST /_license
     ]
 }
 ------------------------------------------------------------
-// CONSOLE
 // TEST[skip:license testing issues]
 
 NOTE: These values are invalid; you must substitute the appropriate content
 from your license file.
 
-You can alternatively use a `curl` command, for example:
+You can also install your license file using a `curl` command. Be sure to add
+`@` before the license file path to instruct curl to treat it as an input file.
 
-[source,js]
 [source,shell]
 ------------------------------------------------------------
 curl -XPUT -u <user> 'http://<host>:<port>/_license' -H "Content-Type: application/json" -d @license.json
 ------------------------------------------------------------
 // NOTCONSOLE
 
-On Windows machine, use the following command:
+On Windows, use the following command:
 
 [source,shell]
 ------------------------------------------------------------
-gc .\license.json |  Invoke-WebRequest -uri http://<host>:<port>/_license -Credential elastic -Method Put -ContentType "application/json"
+Invoke-WebRequest -uri http://<host>:<port>/_xpack/license -Credential elastic -Method Put -ContentType "application/json" -InFile .\license.json
 ------------------------------------------------------------
 
 In these examples,
@@ -129,7 +131,7 @@ receive the following response:
 To complete the update, you must re-submit the API request and set the
 `acknowledge` parameter to `true`. For example:
 
-[source,js]
+[source,console]
 ------------------------------------------------------------
 POST /_license?acknowledge=true
 {
@@ -147,7 +149,6 @@ POST /_license?acknowledge=true
     ]
 }
 ------------------------------------------------------------
-// CONSOLE
 // TEST[skip:license testing issues]
 
 Alternatively:
@@ -159,4 +160,4 @@ curl -XPUT -u elastic 'http://<host>:<port>/_license?acknowledge=true' -H "Conte
 // NOTCONSOLE
 
 For more information about the features that are disabled when you downgrade
-your license, see {xpack-ref}/license-expiration.html[License Expiration].
+your license, see {stack-ov}/license-expiration.html[License Expiration].

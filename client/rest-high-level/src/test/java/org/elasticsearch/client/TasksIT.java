@@ -71,8 +71,8 @@ public class TasksIT extends ESRestHighLevelClientTestCase {
         }
         assertTrue("List tasks were not found", listTasksFound);
     }
-    
-    public void testGetValidTask() throws IOException {
+
+    public void testGetValidTask() throws Exception {
 
         // Run a Reindex to create a task
 
@@ -82,19 +82,27 @@ public class TasksIT extends ESRestHighLevelClientTestCase {
         createIndex(sourceIndex, settings);
         createIndex(destinationIndex, settings);
         BulkRequest bulkRequest = new BulkRequest()
-                .add(new IndexRequest(sourceIndex, "type", "1").source(Collections.singletonMap("foo", "bar"), XContentType.JSON))
-                .add(new IndexRequest(sourceIndex, "type", "2").source(Collections.singletonMap("foo2", "bar2"), XContentType.JSON))
+                .add(new IndexRequest(sourceIndex).id("1").source(Collections.singletonMap("foo", "bar"), XContentType.JSON))
+                .add(new IndexRequest(sourceIndex).id("2").source(Collections.singletonMap("foo2", "bar2"), XContentType.JSON))
                 .setRefreshPolicy(RefreshPolicy.IMMEDIATE);
         assertEquals(RestStatus.OK, highLevelClient().bulk(bulkRequest, RequestOptions.DEFAULT).status());
-        
+
         // (need to use low level client because currently high level client
         // doesn't support async return of task id - needs
         // https://github.com/elastic/elasticsearch/pull/35202 )
         RestClient lowClient = highLevelClient().getLowLevelClient();
         Request request = new Request("POST", "_reindex");
         request.addParameter("wait_for_completion", "false");
-        request.setJsonEntity("{" + "  \"source\": {\n" + "    \"index\": \"source1\"\n" + "  },\n" + "  \"dest\": {\n"
-                + "    \"index\": \"dest\"\n" + "  }" + "}");
+        request.setJsonEntity(
+            "{"
+                + "  \"source\": {\n"
+                + "    \"index\": \"source1\"\n"
+                + "  },\n"
+                + "  \"dest\": {\n"
+                + "    \"index\": \"dest\"\n"
+                + "  }"
+                + "}"
+        );
         Response response = lowClient.performRequest(request);
         Map<String, Object> map = entityAsMap(response);
         Object taskId = map.get("task");
@@ -105,21 +113,24 @@ public class TasksIT extends ESRestHighLevelClientTestCase {
         gtr.setWaitForCompletion(randomBoolean());
         Optional<GetTaskResponse> getTaskResponse = execute(gtr, highLevelClient().tasks()::get, highLevelClient().tasks()::getAsync);
         assertTrue(getTaskResponse.isPresent());
-        GetTaskResponse taskResponse = getTaskResponse.get();        
+        GetTaskResponse taskResponse = getTaskResponse.get();
         if (gtr.getWaitForCompletion()) {
             assertTrue(taskResponse.isCompleted());
         }
         TaskInfo info = taskResponse.getTaskInfo();
         assertTrue(info.isCancellable());
         assertEquals("reindex from [source1] to [dest]", info.getDescription());
-        assertEquals("indices:data/write/reindex", info.getAction());                
-    }    
-    
+        assertEquals("indices:data/write/reindex", info.getAction());
+        if (taskResponse.isCompleted() == false) {
+            assertBusy(ReindexIT.checkCompletionStatus(client(), taskId.toString()));
+        }
+    }
+
     public void testGetInvalidTask() throws IOException {
         // Check 404s are returned as empty Optionals
-        GetTaskRequest gtr = new GetTaskRequest("doesNotExistNodeName", 123);                
+        GetTaskRequest gtr = new GetTaskRequest("doesNotExistNodeName", 123);
         Optional<GetTaskResponse> getTaskResponse = execute(gtr, highLevelClient().tasks()::get, highLevelClient().tasks()::getAsync);
-        assertFalse(getTaskResponse.isPresent());               
+        assertFalse(getTaskResponse.isPresent());
     }
 
     public void testCancelTasks() throws IOException {

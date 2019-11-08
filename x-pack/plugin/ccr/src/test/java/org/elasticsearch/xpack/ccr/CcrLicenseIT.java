@@ -49,7 +49,7 @@ public class CcrLicenseIT extends CcrSingleNodeTestCase {
     }
 
     public void testThatFollowingIndexIsUnavailableWithNonCompliantLicense() throws InterruptedException {
-        final ResumeFollowAction.Request followRequest = getResumeFollowRequest();
+        final ResumeFollowAction.Request followRequest = getResumeFollowRequest("follower");
         final CountDownLatch latch = new CountDownLatch(1);
         client().execute(
                 ResumeFollowAction.INSTANCE,
@@ -71,7 +71,7 @@ public class CcrLicenseIT extends CcrSingleNodeTestCase {
     }
 
     public void testThatCreateAndFollowingIndexIsUnavailableWithNonCompliantLicense() throws InterruptedException {
-        final PutFollowAction.Request createAndFollowRequest = getPutFollowRequest();
+        final PutFollowAction.Request createAndFollowRequest = getPutFollowRequest("leader", "follower");
         final CountDownLatch latch = new CountDownLatch(1);
         client().execute(
                 PutFollowAction.INSTANCE,
@@ -165,7 +165,7 @@ public class CcrLicenseIT extends CcrSingleNodeTestCase {
                 @Override
                 public ClusterState execute(ClusterState currentState) throws Exception {
                     AutoFollowPattern autoFollowPattern = new AutoFollowPattern("test_alias", Collections.singletonList("logs-*"),
-                        null, null, null, null, null, null, null, null, null, null, null);
+                        null, true, null, null, null, null, null, null, null, null, null, null);
                     AutoFollowMetadata autoFollowMetadata = new AutoFollowMetadata(
                         Collections.singletonMap("test_alias", autoFollowPattern),
                         Collections.emptyMap(),

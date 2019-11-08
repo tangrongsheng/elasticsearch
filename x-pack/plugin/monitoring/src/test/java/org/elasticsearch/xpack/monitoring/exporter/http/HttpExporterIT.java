@@ -13,18 +13,27 @@ import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.Requests;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.time.DateFormatter;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.license.XPackLicenseState;
+import org.elasticsearch.rest.RestUtils;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.ESIntegTestCase.Scope;
 import org.elasticsearch.test.http.MockRequest;
@@ -39,12 +48,13 @@ import org.elasticsearch.xpack.monitoring.exporter.ClusterAlertsUtil;
 import org.elasticsearch.xpack.monitoring.exporter.ExportBulk;
 import org.elasticsearch.xpack.monitoring.exporter.Exporter;
 import org.elasticsearch.xpack.monitoring.test.MonitoringIntegTestCase;
-import org.joda.time.format.DateTimeFormat;
 import org.junit.After;
 import org.junit.Before;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -71,7 +81,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 
 @ESIntegTestCase.ClusterScope(scope = Scope.TEST,
-                              numDataNodes = 1, numClientNodes = 0, transportClientRatio = 0.0, supportsDedicatedMasters = false)
+                              numDataNodes = 1, numClientNodes = 0, supportsDedicatedMasters = false)
 public class HttpExporterIT extends MonitoringIntegTestCase {
 
     private final List<String> clusterAlertBlacklist =
@@ -103,25 +113,15 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         return true;
     }
 
-    @Override
-    protected Settings nodeSettings(int nodeOrdinal) {
-        // we create and disable the exporter to avoid the cluster actually using it (thus speeding up tests)
-        // we make an exporter on demand per test
-        return Settings.builder()
-                       .put(super.nodeSettings(nodeOrdinal))
-                       .put("xpack.monitoring.exporters._http.type", "http")
-                       .put("xpack.monitoring.exporters._http.ssl.truststore.password", "foobar") // ensure that ssl can be used by settings
-                       .put("xpack.monitoring.exporters._http.headers.ignored", "value") // ensure that headers can be used by settings
-                       .put("xpack.monitoring.exporters._http.enabled", false)
-                       .build();
-    }
-
     private Settings.Builder baseSettings() {
         return Settings.builder()
-                       .put("xpack.monitoring.exporters._http.type", "http")
-                       .put("xpack.monitoring.exporters._http.host", getFormattedAddress(webServer))
-                       .putList("xpack.monitoring.exporters._http.cluster_alerts.management.blacklist", clusterAlertBlacklist)
-                       .put("xpack.monitoring.exporters._http.index.template.create_legacy_templates", includeOldTemplates);
+            .put("xpack.monitoring.exporters._http.enabled", false)
+            .put("xpack.monitoring.exporters._http.type", "http")
+            .put("xpack.monitoring.exporters._http.ssl.truststore.password", "foobar") // ensure that ssl can be used by settings
+            .put("xpack.monitoring.exporters._http.headers.ignored", "value") // ensure that headers can be used by settings
+            .put("xpack.monitoring.exporters._http.host", getFormattedAddress(webServer))
+            .putList("xpack.monitoring.exporters._http.cluster_alerts.management.blacklist", clusterAlertBlacklist)
+            .put("xpack.monitoring.exporters._http.index.template.create_legacy_templates", includeOldTemplates);
     }
 
     public void testExport() throws Exception {
@@ -273,18 +273,19 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
 
             assertMonitorVersion(secondWebServer);
 
+            String resourcePrefix = "/_template/";
             for (Tuple<String, String> template : monitoringTemplates(includeOldTemplates)) {
                 MockRequest recordedRequest = secondWebServer.takeRequest();
                 assertThat(recordedRequest.getMethod(), equalTo("GET"));
-                assertThat(recordedRequest.getUri().getPath(), equalTo("/_template/" + template.v1()));
-                assertThat(recordedRequest.getUri().getQuery(), equalTo(resourceVersionQueryString()));
+                assertThat(recordedRequest.getUri().getPath(), equalTo(resourcePrefix + template.v1()));
+                assertMonitorVersionQueryString(recordedRequest.getUri().getQuery(), Collections.emptyMap());
 
                 if (missingTemplate.equals(template.v1())) {
                     recordedRequest = secondWebServer.takeRequest();
                     assertThat(recordedRequest.getMethod(), equalTo("PUT"));
-                    assertThat(recordedRequest.getUri().getPath(), equalTo("/_template/" + template.v1()));
-                    assertThat(recordedRequest.getUri().getQuery(), equalTo(resourceVersionQueryString()));
-                    assertThat(recordedRequest.getBody(), equalTo(template.v2()));
+                    assertThat(recordedRequest.getUri().getPath(), equalTo(resourcePrefix + template.v1()));
+                    assertMonitorVersionQueryString(recordedRequest.getUri().getQuery(), Collections.emptyMap());
+                    assertThat(recordedRequest.getBody(), equalTo(getExternalTemplateRepresentation(template.v2())));
                 }
             }
             assertMonitorPipelines(secondWebServer, !pipelineExistsAlready, null, null);
@@ -350,7 +351,8 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
                                remoteClusterAllowsWatcher, currentLicenseAllowsWatcher, watcherAlreadyExists);
         MockRequest recordedRequest = assertBulk(webServer);
 
-        String indexName = indexName(DateTimeFormat.forPattern("YYYY.MM.dd").withZoneUTC(), doc.getSystem(), doc.getTimestamp());
+        DateFormatter formatter = DateFormatter.forPattern("yyyy.MM.dd").withZone(ZoneOffset.UTC);
+        String indexName = indexName(formatter, doc.getSystem(), doc.getTimestamp());
 
         byte[] bytes = recordedRequest.getBody().getBytes(StandardCharsets.UTF_8);
         Map<String, Object> data = XContentHelper.convertToMap(new BytesArray(bytes), false, XContentType.JSON).v2();
@@ -358,7 +360,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         Map<String, Object> index = (Map<String, Object>) data.get("index");
         assertThat(index.get("_index"), equalTo(indexName));
 
-        String newTimeFormat = randomFrom("YY", "YYYY", "YYYY.MM", "YYYY-MM", "MM.YYYY", "MM");
+        String newTimeFormat = randomFrom("yy", "yyyy", "yyyy.MM", "yyyy-MM", "MM.yyyy", "MM");
 
         final Settings newSettings = Settings.builder()
                 .put(settings)
@@ -373,8 +375,10 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         doc = newRandomMonitoringDoc();
         export(newSettings, Collections.singletonList(doc));
 
+        DateFormatter newTimeFormatter = DateFormatter.forPattern(newTimeFormat).withZone(ZoneOffset.UTC);
+
         String expectedMonitoringIndex = ".monitoring-es-" + TEMPLATE_VERSION + "-"
-                + DateTimeFormat.forPattern(newTimeFormat).withZoneUTC().print(doc.getTimestamp());
+                + newTimeFormatter.format(Instant.ofEpochMilli(doc.getTimestamp()));
 
         assertMonitorResources(webServer, true, includeOldTemplates, true,
                                true, true, true);
@@ -457,7 +461,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
 
             assertThat(getRequest.getMethod(), equalTo("GET"));
             assertThat(getRequest.getUri().getPath(), equalTo(pathPrefix + resourcePrefix + resource.v1()));
-            assertThat(getRequest.getUri().getQuery(), equalTo(resourceVersionQueryString()));
+            assertMonitorVersionQueryString(getRequest.getUri().getQuery(), Collections.emptyMap());
             assertHeaders(getRequest, customHeaders);
 
             if (alreadyExists == false) {
@@ -465,11 +469,30 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
 
                 assertThat(putRequest.getMethod(), equalTo("PUT"));
                 assertThat(putRequest.getUri().getPath(), equalTo(pathPrefix + resourcePrefix + resource.v1()));
-                assertThat(putRequest.getUri().getQuery(), equalTo(resourceVersionQueryString()));
-                assertThat(putRequest.getBody(), equalTo(resource.v2()));
+                Map<String, String> parameters = Collections.emptyMap();
+                assertMonitorVersionQueryString(putRequest.getUri().getQuery(), parameters);
+                if (resourcePrefix.startsWith("/_template")) {
+                    assertThat(putRequest.getBody(), equalTo(getExternalTemplateRepresentation(resource.v2())));
+                } else {
+                    assertThat(putRequest.getBody(), equalTo(resource.v2()));
+                }
                 assertHeaders(putRequest, customHeaders);
             }
         }
+    }
+
+    private void assertMonitorVersionQueryString(String query, final Map<String, String> parameters) {
+        Map<String, String> expectedQueryStringMap = new HashMap<>();
+        RestUtils.decodeQueryString(query, 0, expectedQueryStringMap);
+
+        Map<String, String> resourceVersionQueryStringMap = new HashMap<>();
+        RestUtils.decodeQueryString(resourceVersionQueryString(), 0, resourceVersionQueryStringMap);
+
+        Map<String, String> actualQueryStringMap = new HashMap<>();
+        actualQueryStringMap.putAll(resourceVersionQueryStringMap);
+        actualQueryStringMap.putAll(parameters);
+
+        assertEquals(expectedQueryStringMap, actualQueryStringMap);
     }
 
     private void assertMonitorWatches(final MockWebServer webServer,
@@ -497,7 +520,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
                 // GET / PUT if we are allowed to use it
                 if (currentLicenseAllowsWatcher && clusterAlertBlacklist.contains(watch.v1()) == false) {
                     assertThat(request.getMethod(), equalTo("GET"));
-                    assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_xpack/watcher/watch/" + uniqueWatchId));
+                    assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_watcher/watch/" + uniqueWatchId));
                     assertThat(request.getUri().getQuery(), equalTo(resourceClusterAlertQueryString()));
                     assertHeaders(request, customHeaders);
 
@@ -505,7 +528,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
                         request = webServer.takeRequest();
 
                         assertThat(request.getMethod(), equalTo("PUT"));
-                        assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_xpack/watcher/watch/" + uniqueWatchId));
+                        assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_watcher/watch/" + uniqueWatchId));
                         assertThat(request.getUri().getQuery(), equalTo(resourceClusterAlertQueryString()));
                         assertThat(request.getBody(), equalTo(watch.v2()));
                         assertHeaders(request, customHeaders);
@@ -513,7 +536,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
                 // DELETE if we're not allowed to use it
                 } else {
                     assertThat(request.getMethod(), equalTo("DELETE"));
-                    assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_xpack/watcher/watch/" + uniqueWatchId));
+                    assertThat(request.getUri().getPath(), equalTo(pathPrefix + "/_watcher/watch/" + uniqueWatchId));
                     assertThat(request.getUri().getQuery(), equalTo(resourceClusterAlertQueryString()));
                     assertHeaders(request, customHeaders);
                 }
@@ -575,7 +598,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         assertBusy(() -> assertThat(clusterService().state().version(), not(ClusterState.UNKNOWN_VERSION)));
 
         try (HttpExporter exporter = createHttpExporter(settings)) {
-            final CountDownLatch awaitResponseAndClose = new CountDownLatch(2);
+            final CountDownLatch awaitResponseAndClose = new CountDownLatch(1);
 
             exporter.openBulk(ActionListener.wrap(exportBulk -> {
                 final HttpExportBulk bulk = (HttpExportBulk)exportBulk;
@@ -587,9 +610,8 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
                     e -> fail(e.getMessage())
                 );
 
-                bulk.doAdd(docs);
-                bulk.doFlush(listener);
-                bulk.doClose(listener); // reusing the same listener, which is why we expect countDown x2
+                bulk.add(docs);
+                bulk.flush(listener);
             }, e -> fail("Failed to create HttpExportBulk")));
 
             // block until the bulk responds
@@ -603,7 +625,8 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         long intervalMillis = randomNonNegativeLong();
         MonitoringDoc.Node sourceNode = MonitoringTestUtils.randomMonitoringNode(random());
 
-        return new IndexRecoveryMonitoringDoc(clusterUUID, timestamp, intervalMillis, sourceNode, new RecoveryResponse());
+        return new IndexRecoveryMonitoringDoc(clusterUUID, timestamp, intervalMillis, sourceNode,
+            new RecoveryResponse(0, 0, 0, null, null));
     }
 
     private List<MonitoringDoc> newRandomMonitoringDocs(int nb) {
@@ -833,7 +856,7 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
 
     private void assertBulkRequest(String requestBody, int numberOfActions) throws Exception {
         BulkRequest bulkRequest = Requests.bulkRequest()
-                .add(new BytesArray(requestBody.getBytes(StandardCharsets.UTF_8)), null, null, XContentType.JSON);
+                .add(new BytesArray(requestBody.getBytes(StandardCharsets.UTF_8)), null, XContentType.JSON);
         assertThat(bulkRequest.numberOfActions(), equalTo(numberOfActions));
         for (DocWriteRequest actionRequest : bulkRequest.requests()) {
             assertThat(actionRequest, instanceOf(IndexRequest.class));
@@ -882,4 +905,12 @@ public class HttpExporterIT extends MonitoringIntegTestCase {
         return expectedTemplateNames;
     }
 
+    private String getExternalTemplateRepresentation(String internalRepresentation) throws IOException {
+        try (XContentParser parser = XContentFactory.xContent(XContentType.JSON)
+            .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, internalRepresentation)) {
+            XContentBuilder builder = JsonXContent.contentBuilder();
+            IndexTemplateMetaData.Builder.removeType(IndexTemplateMetaData.Builder.fromXContent(parser, ""), builder);
+            return BytesReference.bytes(builder).utf8ToString();
+        }
+    }
 }

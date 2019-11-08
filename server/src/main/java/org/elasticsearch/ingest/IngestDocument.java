@@ -19,9 +19,6 @@
 
 package org.elasticsearch.ingest;
 
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.Set;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.mapper.IdFieldMapper;
@@ -37,12 +34,16 @@ import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Date;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiConsumer;
 
 /**
  * Represents a single document being captured before indexing and holds the source and metadata (like id, type and index).
@@ -61,12 +62,11 @@ public final class IngestDocument {
     // Contains all pipelines that have been executed for this document
     private final Set<Pipeline> executedPipelines = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    public IngestDocument(String index, String type, String id, String routing,
+    public IngestDocument(String index, String id, String routing,
                           Long version, VersionType versionType, Map<String, Object> source) {
         this.sourceAndMetadata = new HashMap<>();
         this.sourceAndMetadata.putAll(source);
         this.sourceAndMetadata.put(MetaData.INDEX.getFieldName(), index);
-        this.sourceAndMetadata.put(MetaData.TYPE.getFieldName(), type);
         this.sourceAndMetadata.put(MetaData.ID.getFieldName(), id);
         if (routing != null) {
             this.sourceAndMetadata.put(MetaData.ROUTING.getFieldName(), routing);
@@ -641,17 +641,18 @@ public final class IngestDocument {
     /**
      * Executes the given pipeline with for this document unless the pipeline has already been executed
      * for this document.
-     * @param pipeline Pipeline to execute
-     * @throws Exception On exception in pipeline execution
+     *
+     * @param pipeline the pipeline to execute
+     * @param handler handles the result or failure
      */
-    public IngestDocument executePipeline(Pipeline pipeline) throws Exception {
-        try {
-            if (this.executedPipelines.add(pipeline) == false) {
-                throw new IllegalStateException("Cycle detected for pipeline: " + pipeline.getId());
-            }
-            return pipeline.execute(this);
-        } finally {
-            executedPipelines.remove(pipeline);
+    public void executePipeline(Pipeline pipeline, BiConsumer<IngestDocument, Exception> handler) {
+        if (executedPipelines.add(pipeline)) {
+            pipeline.execute(this, (result, e) -> {
+                executedPipelines.remove(pipeline);
+                handler.accept(result, e);
+            });
+        } else {
+            handler.accept(null, new IllegalStateException("Cycle detected for pipeline: " + pipeline.getId()));
         }
     }
 

@@ -35,10 +35,11 @@ import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.get.GetResult;
 import org.elasticsearch.indices.TermsLookup;
-import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.test.AbstractQueryTestCase;
+import org.hamcrest.CoreMatchers;
 import org.junit.Before;
 
 import java.io.IOException;
@@ -82,7 +83,8 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
                     choice.equals(GEO_POINT_ALIAS_FIELD_NAME) ||
                     choice.equals(GEO_SHAPE_FIELD_NAME) ||
                     choice.equals(INT_RANGE_FIELD_NAME) ||
-                    choice.equals(DATE_RANGE_FIELD_NAME),
+                    choice.equals(DATE_RANGE_FIELD_NAME) ||
+                    choice.equals(DATE_NANOS_FIELD_NAME), // TODO: needs testing for date_nanos type
                 () -> getRandomFieldName());
             Object[] values = new Object[randomInt(5)];
             for (int i = 0; i < values.length; i++) {
@@ -97,12 +99,13 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
     }
 
     private TermsLookup randomTermsLookup() {
-        return new TermsLookup(randomAlphaOfLength(10), randomAlphaOfLength(10), randomAlphaOfLength(10),
-                termsPath).routing(randomBoolean() ? randomAlphaOfLength(10) : null);
+        TermsLookup lookup = new TermsLookup(randomAlphaOfLength(10), randomAlphaOfLength(10), termsPath);
+        lookup.routing(randomBoolean() ? randomAlphaOfLength(10) : null);
+        return lookup;
     }
 
     @Override
-    protected void doAssertLuceneQuery(TermsQueryBuilder queryBuilder, Query query, SearchContext context) throws IOException {
+    protected void doAssertLuceneQuery(TermsQueryBuilder queryBuilder, Query query, QueryShardContext context) throws IOException {
         if (queryBuilder.termsLookup() == null && (queryBuilder.values() == null || queryBuilder.values().isEmpty())) {
             assertThat(query, instanceOf(MatchNoDocsQuery.class));
             MatchNoDocsQuery matchNoDocsQuery = (MatchNoDocsQuery) query;
@@ -201,7 +204,8 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
         } catch (IOException ex) {
             throw new ElasticsearchException("boom", ex);
         }
-        return new GetResponse(new GetResult(getRequest.index(), getRequest.type(), getRequest.id(), 0, true, new BytesArray(json), null));
+        return new GetResponse(new GetResult(getRequest.index(), getRequest.id(), 0, 1, 0, true,
+            new BytesArray(json), null, null));
     }
 
     public void testNumeric() throws IOException {
@@ -272,13 +276,6 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
                 e.getMessage());
     }
 
-    @Override
-    protected boolean isCachable(TermsQueryBuilder queryBuilder) {
-        // even though we use a terms lookup here we do this during rewrite and that means we are cachable on toQuery
-        // that's why we return true here all the time
-        return super.isCachable(queryBuilder);
-    }
-
     public void testSerializationFailsUnlessFetched() throws IOException {
         QueryBuilder builder = new TermsQueryBuilder(STRING_FIELD_NAME, randomTermsLookup());
         QueryBuilder termsQueryBuilder = Rewriteable.rewrite(builder, createShardContext());
@@ -309,5 +306,17 @@ public class TermsQueryBuilderTests extends AbstractQueryTestCase<TermsQueryBuil
         assertEquals(Arrays.asList(5, 42d), TermsQueryBuilder.convert(list));
         assertEquals(Arrays.asList(5, 42d), TermsQueryBuilder.convertBack(TermsQueryBuilder.convert(list)));
     }
-}
 
+    public void testTypeField() throws IOException {
+        TermsQueryBuilder builder = QueryBuilders.termsQuery("_type", "value1", "value2");
+        builder.doToQuery(createShardContext());
+        assertWarnings(QueryShardContext.TYPES_DEPRECATION_MESSAGE);
+    }
+
+    @Override
+    protected QueryBuilder parseQuery(XContentParser parser) throws IOException {
+        QueryBuilder query = super.parseQuery(parser);
+        assertThat(query, CoreMatchers.instanceOf(TermsQueryBuilder.class));
+        return query;
+    }
+}

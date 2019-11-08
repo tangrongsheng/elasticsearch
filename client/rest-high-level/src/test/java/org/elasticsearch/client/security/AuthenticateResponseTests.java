@@ -27,7 +27,6 @@ import org.elasticsearch.test.EqualsHashCodeTestUtils;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,17 +37,19 @@ public class AuthenticateResponseTests extends ESTestCase {
 
     public void testFromXContent() throws IOException {
         xContentTester(
-                this::createParser,
-                this::createTestInstance,
-                this::toXContent,
-                AuthenticateResponse::fromXContent)
-                .supportsUnknownFields(false)
-                .test();
+            this::createParser,
+            this::createTestInstance,
+            this::toXContent,
+            AuthenticateResponse::fromXContent)
+            .supportsUnknownFields(true)
+            //metadata is a series of kv pairs, so we dont want to add random fields here for test equality
+            .randomFieldsExcludeFilter(f -> f.startsWith("metadata"))
+            .test();
     }
 
     public void testEqualsAndHashCode() {
-        final AuthenticateResponse reponse = createTestInstance();
-        EqualsHashCodeTestUtils.checkEqualsAndHashCode(reponse, this::copy,
+        final AuthenticateResponse response = createTestInstance();
+        EqualsHashCodeTestUtils.checkEqualsAndHashCode(response, this::copy,
             this::mutate);
     }
 
@@ -108,7 +109,7 @@ public class AuthenticateResponseTests extends ESTestCase {
     private AuthenticateResponse copy(AuthenticateResponse response) {
         final User originalUser = response.getUser();
         final User copyUser = new User(originalUser.getUsername(), originalUser.getRoles(), originalUser.getMetadata(),
-                originalUser.getFullName(), originalUser.getEmail());
+            originalUser.getFullName(), originalUser.getEmail());
         return new AuthenticateResponse(copyUser, response.enabled(), response.getAuthenticationRealm(),
             response.getLookupRealm());
     }
@@ -117,11 +118,11 @@ public class AuthenticateResponseTests extends ESTestCase {
         final User originalUser = response.getUser();
         switch (randomIntBetween(1, 8)) {
             case 1:
-            return new AuthenticateResponse(new User(originalUser.getUsername() + "wrong", originalUser.getRoles(),
+                return new AuthenticateResponse(new User(originalUser.getUsername() + "wrong", originalUser.getRoles(),
                     originalUser.getMetadata(), originalUser.getFullName(), originalUser.getEmail()), response.enabled(),
-                response.getAuthenticationRealm(), response.getLookupRealm());
+                    response.getAuthenticationRealm(), response.getLookupRealm());
             case 2:
-                final Collection<String> wrongRoles = new ArrayList<>(originalUser.getRoles());
+                final List<String> wrongRoles = new ArrayList<>(originalUser.getRoles());
                 wrongRoles.add(randomAlphaOfLengthBetween(1, 4));
                 return new AuthenticateResponse(new User(originalUser.getUsername(), wrongRoles, originalUser.getMetadata(),
                     originalUser.getFullName(), originalUser.getEmail()), response.enabled(), response.getAuthenticationRealm(),
@@ -134,11 +135,11 @@ public class AuthenticateResponseTests extends ESTestCase {
                     response.getLookupRealm());
             case 4:
                 return new AuthenticateResponse(new User(originalUser.getUsername(), originalUser.getRoles(), originalUser.getMetadata(),
-                        originalUser.getFullName() + "wrong", originalUser.getEmail()), response.enabled(),
+                    originalUser.getFullName() + "wrong", originalUser.getEmail()), response.enabled(),
                     response.getAuthenticationRealm(), response.getLookupRealm());
             case 5:
                 return new AuthenticateResponse(new User(originalUser.getUsername(), originalUser.getRoles(), originalUser.getMetadata(),
-                        originalUser.getFullName(), originalUser.getEmail() + "wrong"), response.enabled(),
+                    originalUser.getFullName(), originalUser.getEmail() + "wrong"), response.enabled(),
                     response.getAuthenticationRealm(), response.getLookupRealm());
             case 6:
                 return new AuthenticateResponse(new User(originalUser.getUsername(), originalUser.getRoles(), originalUser.getMetadata(),

@@ -61,6 +61,10 @@ public abstract class InnerHitContextBuilder {
         doBuild(parentSearchContext, innerHitsContext);
     }
 
+    public InnerHitBuilder innerHitBuilder() {
+        return innerHitBuilder;
+    }
+
     protected abstract void doBuild(SearchContext parentSearchContext, InnerHitsContext innerHitsContext) throws IOException;
 
     public static void extractInnerHits(QueryBuilder query, Map<String, InnerHitContextBuilder> innerHitBuilders) {
@@ -78,6 +82,7 @@ public abstract class InnerHitContextBuilder {
         innerHitsContext.size(innerHitBuilder.getSize());
         innerHitsContext.explain(innerHitBuilder.isExplain());
         innerHitsContext.version(innerHitBuilder.isVersion());
+        innerHitsContext.seqNoAndPrimaryTerm(innerHitBuilder.isSeqNoAndPrimaryTerm());
         innerHitsContext.trackScores(innerHitBuilder.isTrackScores());
         if (innerHitBuilder.getStoredFieldsContext() != null) {
             innerHitsContext.storedFieldsContext(innerHitBuilder.getStoredFieldsContext());

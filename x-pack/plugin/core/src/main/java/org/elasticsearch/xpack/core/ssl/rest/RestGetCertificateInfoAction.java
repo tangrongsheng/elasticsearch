@@ -6,7 +6,6 @@
 package org.elasticsearch.xpack.core.ssl.rest;
 
 import org.elasticsearch.client.node.NodeClient;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.BytesRestResponse;
@@ -18,8 +17,6 @@ import org.elasticsearch.rest.action.RestBuilderListener;
 import org.elasticsearch.xpack.core.ssl.action.GetCertificateInfoAction;
 import org.elasticsearch.xpack.core.ssl.action.GetCertificateInfoAction.Response;
 
-import java.io.IOException;
-
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 
 /**
@@ -28,18 +25,17 @@ import static org.elasticsearch.rest.RestRequest.Method.GET;
  */
 public class RestGetCertificateInfoAction extends BaseRestHandler {
 
-    public RestGetCertificateInfoAction(Settings settings, RestController controller) {
-        super(settings);
-        controller.registerHandler(GET, "/_xpack/ssl/certificates", this);
+    public RestGetCertificateInfoAction(RestController controller) {
+        controller.registerHandler(GET, "/_ssl/certificates", this);
     }
 
     @Override
     public String getName() {
-        return "xpack_ssl_get_certificates";
+        return "ssl_get_certificates";
     }
 
     @Override
-    protected final RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) throws IOException {
+    protected final RestChannelConsumer prepareRequest(RestRequest request, NodeClient client) {
         return channel -> new GetCertificateInfoAction.RequestBuilder(client, GetCertificateInfoAction.INSTANCE)
                 .execute(new RestBuilderListener<Response>(channel) {
                     @Override

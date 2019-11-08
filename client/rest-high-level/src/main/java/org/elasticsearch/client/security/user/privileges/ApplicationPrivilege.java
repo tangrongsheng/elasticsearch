@@ -24,17 +24,16 @@ import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.xcontent.ConstructingObjectParser;
 import org.elasticsearch.common.xcontent.ObjectParser;
+import org.elasticsearch.common.xcontent.ToXContentObject;
+import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 
 import java.io.IOException;
-
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 import static org.elasticsearch.common.xcontent.ConstructingObjectParser.constructorArg;
 import static org.elasticsearch.common.xcontent.ConstructingObjectParser.optionalConstructorArg;
@@ -44,7 +43,7 @@ import static org.elasticsearch.common.xcontent.ConstructingObjectParser.optiona
  * actions and metadata are completely managed by the client and can contain arbitrary
  * string values.
  */
-public final class ApplicationPrivilege {
+public final class ApplicationPrivilege implements ToXContentObject {
 
     private static final ParseField APPLICATION = new ParseField("application");
     private static final ParseField NAME = new ParseField("name");
@@ -53,10 +52,10 @@ public final class ApplicationPrivilege {
 
     private final String application;
     private final String name;
-    private final Set<String> actions;
+    private final List<String> actions;
     private final Map<String, Object> metadata;
 
-    public ApplicationPrivilege(String application, String name, Collection<String> actions, @Nullable Map<String, Object> metadata) {
+    public ApplicationPrivilege(String application, String name, List<String> actions, @Nullable Map<String, Object> metadata) {
         if (Strings.isNullOrEmpty(application)) {
             throw new IllegalArgumentException("application name must be provided");
         } else {
@@ -70,12 +69,12 @@ public final class ApplicationPrivilege {
         if (actions == null || actions.isEmpty()) {
             throw new IllegalArgumentException("actions must be provided");
         } else {
-            this.actions = Collections.unmodifiableSet(new HashSet<>(actions));
+            this.actions = List.copyOf(actions);
         }
         if (metadata == null || metadata.isEmpty()) {
             this.metadata = Collections.emptyMap();
         } else {
-            this.metadata = Collections.unmodifiableMap(metadata);
+            this.metadata = Map.copyOf(metadata);
         }
     }
 
@@ -87,7 +86,7 @@ public final class ApplicationPrivilege {
         return name;
     }
 
-    public Set<String> getActions() {
+    public List<String> getActions() {
         return actions;
     }
 
@@ -98,7 +97,7 @@ public final class ApplicationPrivilege {
     @SuppressWarnings("unchecked")
     public static final ConstructingObjectParser<ApplicationPrivilege, String> PARSER = new ConstructingObjectParser<>(
         "application_privilege",
-        true, args -> new ApplicationPrivilege((String) args[0], (String) args[1], (Collection<String>) args[2],
+        true, args -> new ApplicationPrivilege((String) args[0], (String) args[1], (List<String>) args[2],
         (Map<String, Object>) args[3]));
 
     static {
@@ -135,7 +134,7 @@ public final class ApplicationPrivilege {
     public static final class Builder {
         private String applicationName = null;
         private String privilegeName = null;
-        private Collection<String> actions = null;
+        private List<String> actions = null;
         private Map<String, Object> metadata = null;
 
         private Builder() {
@@ -156,7 +155,7 @@ public final class ApplicationPrivilege {
             return this;
         }
 
-        public Builder actions(Collection<String> actions) {
+        public Builder actions(List<String> actions) {
             this.actions = Objects.requireNonNull(actions);
             return this;
         }
@@ -169,6 +168,18 @@ public final class ApplicationPrivilege {
         public ApplicationPrivilege build() {
             return new ApplicationPrivilege(applicationName, privilegeName, actions, metadata);
         }
+    }
+
+    @Override
+    public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+        builder.startObject()
+        .field(APPLICATION.getPreferredName(), application)
+        .field(NAME.getPreferredName(), name)
+        .field(ACTIONS.getPreferredName(), actions);
+        if (metadata != null && metadata.isEmpty() == false) {
+            builder.field(METADATA.getPreferredName(), metadata);
+        }
+        return builder.endObject();
     }
 
 }

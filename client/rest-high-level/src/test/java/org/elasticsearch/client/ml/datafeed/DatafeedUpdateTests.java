@@ -35,9 +35,6 @@ public class DatafeedUpdateTests extends AbstractXContentTestCase<DatafeedUpdate
     public static DatafeedUpdate createRandom() {
         DatafeedUpdate.Builder builder = new DatafeedUpdate.Builder(DatafeedConfigTests.randomValidDatafeedId());
         if (randomBoolean()) {
-            builder.setJobId(randomAlphaOfLength(10));
-        }
-        if (randomBoolean()) {
             builder.setQueryDelay(TimeValue.timeValueMillis(randomIntBetween(1, Integer.MAX_VALUE)));
         }
         if (randomBoolean()) {
@@ -45,9 +42,6 @@ public class DatafeedUpdateTests extends AbstractXContentTestCase<DatafeedUpdate
         }
         if (randomBoolean()) {
             builder.setIndices(DatafeedConfigTests.randomStringList(1, 10));
-        }
-        if (randomBoolean()) {
-            builder.setTypes(DatafeedConfigTests.randomStringList(1, 10));
         }
         if (randomBoolean()) {
             try {
@@ -85,6 +79,9 @@ public class DatafeedUpdateTests extends AbstractXContentTestCase<DatafeedUpdate
         }
         if (randomBoolean()) {
             builder.setDelayedDataCheckConfig(DelayedDataCheckConfigTests.createRandomizedConfig());
+        }
+        if (randomBoolean()) {
+            builder.setMaxEmptySearches(randomIntBetween(10, 100));
         }
         return builder.build();
     }

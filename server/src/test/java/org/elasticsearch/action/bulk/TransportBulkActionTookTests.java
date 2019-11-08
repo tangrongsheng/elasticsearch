@@ -21,10 +21,10 @@
 package org.elasticsearch.action.bulk;
 
 import org.apache.lucene.util.Constants;
-import org.elasticsearch.action.Action;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionResponse;
+import org.elasticsearch.action.ActionType;
 import org.elasticsearch.action.IndicesRequest;
 import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
 import org.elasticsearch.action.support.ActionFilters;
@@ -103,8 +103,8 @@ public class TransportBulkActionTookTests extends ESTestCase {
         NodeClient client = new NodeClient(Settings.EMPTY, threadPool) {
             @Override
             public <Request extends ActionRequest, Response extends ActionResponse>
-            void doExecute(Action<Response> action, Request request, ActionListener<Response> listener) {
-                listener.onResponse((Response)new CreateIndexResponse());
+            void doExecute(ActionType<Response> action, Request request, ActionListener<Response> listener) {
+                listener.onResponse((Response)new CreateIndexResponse(false, false, null));
             }
         };
 
@@ -114,7 +114,6 @@ public class TransportBulkActionTookTests extends ESTestCase {
                     threadPool,
                     transportService,
                     clusterService,
-                    null,
                     client,
                     actionFilters,
                     resolver,
@@ -138,7 +137,6 @@ public class TransportBulkActionTookTests extends ESTestCase {
                     threadPool,
                     transportService,
                     clusterService,
-                    null,
                     client,
                     actionFilters,
                     resolver,
@@ -178,7 +176,7 @@ public class TransportBulkActionTookTests extends ESTestCase {
             bulkAction = Strings.replace(bulkAction, "\r\n", "\n");
         }
         BulkRequest bulkRequest = new BulkRequest();
-        bulkRequest.add(bulkAction.getBytes(StandardCharsets.UTF_8), 0, bulkAction.length(), null, null, XContentType.JSON);
+        bulkRequest.add(bulkAction.getBytes(StandardCharsets.UTF_8), 0, bulkAction.length(), null, XContentType.JSON);
         AtomicLong expected = new AtomicLong();
         TransportBulkAction action = createAction(controlled, expected);
         action.doExecute(null, bulkRequest, new ActionListener<BulkResponse>() {
@@ -215,7 +213,6 @@ public class TransportBulkActionTookTests extends ESTestCase {
                 ThreadPool threadPool,
                 TransportService transportService,
                 ClusterService clusterService,
-                TransportShardBulkAction shardBulkAction,
                 NodeClient client,
                 ActionFilters actionFilters,
                 IndexNameExpressionResolver indexNameExpressionResolver,
@@ -226,7 +223,6 @@ public class TransportBulkActionTookTests extends ESTestCase {
                     transportService,
                     clusterService,
                     null,
-                    shardBulkAction,
                     client,
                     actionFilters,
                     indexNameExpressionResolver,

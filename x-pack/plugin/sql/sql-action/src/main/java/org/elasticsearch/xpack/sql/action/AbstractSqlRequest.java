@@ -28,7 +28,7 @@ public abstract class AbstractSqlRequest extends ActionRequest implements ToXCon
     private RequestInfo requestInfo;
 
     protected AbstractSqlRequest() {
-
+        this.requestInfo = new RequestInfo(Mode.PLAIN);
     }
 
     protected AbstractSqlRequest(RequestInfo requestInfo) {
@@ -49,11 +49,6 @@ public abstract class AbstractSqlRequest extends ActionRequest implements ToXCon
             validationException = addValidationError("[mode] is required", validationException);
         }
         return validationException;
-    }
-
-    @Override
-    public final void readFrom(StreamInput in) throws IOException {
-        throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
     }
 
     @Override

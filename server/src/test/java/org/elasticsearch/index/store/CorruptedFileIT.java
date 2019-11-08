@@ -21,7 +21,10 @@ package org.elasticsearch.index.store;
 import com.carrotsearch.hppc.cursors.IntObjectCursor;
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
 import org.apache.lucene.index.CheckIndex;
-import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.elasticsearch.action.admin.cluster.node.stats.NodeStats;
@@ -50,6 +53,7 @@ import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexSettings;
@@ -104,7 +108,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 
-@ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.SUITE)
+@ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST)
 public class CorruptedFileIT extends ESIntegTestCase {
 
     @Override
@@ -153,11 +157,13 @@ public class CorruptedFileIT extends ESIntegTestCase {
         disableAllocation("test");
         IndexRequestBuilder[] builders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < builders.length; i++) {
-            builders[i] = client().prepareIndex("test", "type").setSource("field", "value");
+            builders[i] = client().prepareIndex("test").setSource("field", "value");
         }
         indexRandom(true, builders);
         ensureGreen();
-        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).execute().actionGet());
+        // double flush to create safe commit in case of async durability
+        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).get());
+        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).get());
         // we have to flush at least once here since we don't corrupt the translog
         SearchResponse countResponse = client().prepareSearch().setSize(0).get();
         assertHitCount(countResponse, numDocs);
@@ -257,11 +263,13 @@ public class CorruptedFileIT extends ESIntegTestCase {
         ensureGreen();
         IndexRequestBuilder[] builders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < builders.length; i++) {
-            builders[i] = client().prepareIndex("test", "type").setSource("field", "value");
+            builders[i] = client().prepareIndex("test").setSource("field", "value");
         }
         indexRandom(true, builders);
         ensureGreen();
-        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).execute().actionGet());
+        // double flush to create safe commit in case of async durability
+        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).get());
+        assertAllSuccessful(client().admin().indices().prepareFlush().setForce(true).get());
         // we have to flush at least once here since we don't corrupt the translog
         SearchResponse countResponse = client().prepareSearch().setSize(0).get();
         assertHitCount(countResponse, numDocs);
@@ -274,17 +282,20 @@ public class CorruptedFileIT extends ESIntegTestCase {
         client().admin().indices().prepareUpdateSettings("test").setSettings(build).get();
         client().admin().cluster().prepareReroute().get();
 
-        boolean didClusterTurnRed = awaitBusy(() -> {
+        boolean didClusterTurnRed = waitUntil(() -> {
             ClusterHealthStatus test = client().admin().cluster()
                 .health(Requests.clusterHealthRequest("test")).actionGet().getStatus();
             return test == ClusterHealthStatus.RED;
         }, 5, TimeUnit.MINUTES);// sometimes on slow nodes the replication / recovery is just dead slow
+
         final ClusterHealthResponse response = client().admin().cluster()
             .health(Requests.clusterHealthRequest("test")).get();
+
         if (response.getStatus() != ClusterHealthStatus.RED) {
             logger.info("Cluster turned red in busy loop: {}", didClusterTurnRed);
             logger.info("cluster state:\n{}\n{}",
-                client().admin().cluster().prepareState().get().getState(), client().admin().cluster().preparePendingClusterTasks().get());
+                client().admin().cluster().prepareState().get().getState(),
+                client().admin().cluster().preparePendingClusterTasks().get());
         }
         assertThat(response.getStatus(), is(ClusterHealthStatus.RED));
         ClusterState state = client().admin().cluster().prepareState().get().getState();
@@ -406,7 +417,7 @@ public class CorruptedFileIT extends ESIntegTestCase {
         ensureGreen();
         IndexRequestBuilder[] builders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < builders.length; i++) {
-            builders[i] = client().prepareIndex("test", "type").setSource("field", "value");
+            builders[i] = client().prepareIndex("test").setSource("field", "value");
         }
         indexRandom(true, builders);
         ensureGreen();
@@ -492,7 +503,7 @@ public class CorruptedFileIT extends ESIntegTestCase {
         ensureGreen();
         IndexRequestBuilder[] builders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < builders.length; i++) {
-            builders[i] = client().prepareIndex("test", "type").setSource("field", "value");
+            builders[i] = client().prepareIndex("test").setSource("field", "value");
         }
         indexRandom(true, builders);
         ensureGreen();
@@ -552,7 +563,7 @@ public class CorruptedFileIT extends ESIntegTestCase {
         ensureGreen();
         IndexRequestBuilder[] builders = new IndexRequestBuilder[numDocs];
         for (int i = 0; i < builders.length; i++) {
-            builders[i] = client().prepareIndex("test", "type").setSource("field", "value");
+            builders[i] = client().prepareIndex("test").setSource("field", "value");
         }
         indexRandom(true, builders);
         ensureGreen();
@@ -596,7 +607,7 @@ public class CorruptedFileIT extends ESIntegTestCase {
             Settings.builder().putNull(EnableAllocationDecider.CLUSTER_ROUTING_ALLOCATION_ENABLE_SETTING.getKey())
         ));
 
-        ensureGreen();
+        ensureGreen(TimeValue.timeValueSeconds(60));
     }
 
     private int numShards(String... index) {
@@ -644,18 +655,26 @@ public class CorruptedFileIT extends ESIntegTestCase {
             Path file = PathUtils.get(path)
                 .resolve("indices").resolve(test.getUUID()).resolve(Integer.toString(shardRouting.getId())).resolve("index");
             if (Files.exists(file)) { // multi data path might only have one path in use
-                try (DirectoryStream<Path> stream = Files.newDirectoryStream(file)) {
-                    for (Path item : stream) {
-                        if (Files.isRegularFile(item) && "write.lock".equals(item.getFileName().toString()) == false) {
-                            if (includePerCommitFiles || isPerSegmentFile(item.getFileName().toString())) {
-                                files.add(item);
+                try (Directory dir = FSDirectory.open(file)) {
+                    SegmentInfos segmentCommitInfos = Lucene.readSegmentInfos(dir);
+                    if (includePerCommitFiles) {
+                        files.add(file.resolve(segmentCommitInfos.getSegmentsFileName()));
+                    }
+                    for (SegmentCommitInfo commitInfo : segmentCommitInfos) {
+                        if (commitInfo.getDelCount() + commitInfo.getSoftDelCount() == commitInfo.info.maxDoc()) {
+                            // don't corrupt fully deleted segments - they might be removed on snapshot
+                            continue;
+                        }
+                        for (String commitFile : commitInfo.files()) {
+                            if (includePerCommitFiles || isPerSegmentFile(commitFile)) {
+                                files.add(file.resolve(commitFile));
                             }
                         }
                     }
+
                 }
             }
         }
-        pruneOldDeleteGenerations(files);
         CorruptionUtils.corruptFile(random(), files.toArray(new Path[0]));
         return shardRouting;
     }
@@ -667,44 +686,6 @@ public class CorruptedFileIT extends ESIntegTestCase {
 
     private static boolean isPerSegmentFile(String fileName) {
         return isPerCommitFile(fileName) == false;
-    }
-
-    /**
-     * prunes the list of index files such that only the latest del generation files are contained.
-     */
-    private void pruneOldDeleteGenerations(Set<Path> files) {
-        final TreeSet<Path> delFiles = new TreeSet<>();
-        for (Path file : files) {
-            if (file.getFileName().toString().endsWith(".liv")) {
-                delFiles.add(file);
-            }
-        }
-        Path last = null;
-        for (Path current : delFiles) {
-            if (last != null) {
-                final String newSegmentName = IndexFileNames.parseSegmentName(current.getFileName().toString());
-                final String oldSegmentName = IndexFileNames.parseSegmentName(last.getFileName().toString());
-                if (newSegmentName.equals(oldSegmentName)) {
-                    int oldGen =
-                        Integer.parseInt(
-                            IndexFileNames.stripExtension(
-                                IndexFileNames.stripSegmentName(last.getFileName().toString())).replace("_", ""),
-                            Character.MAX_RADIX
-                        );
-                    int newGen = Integer.parseInt(
-                        IndexFileNames.stripExtension(
-                            IndexFileNames.stripSegmentName(current.getFileName().toString())).replace("_", ""),
-                        Character.MAX_RADIX);
-                    if (newGen > oldGen) {
-                        files.remove(last);
-                    } else {
-                        files.remove(current);
-                        continue;
-                    }
-                }
-            }
-            last = current;
-        }
     }
 
     public List<Path> listShardFiles(ShardRouting routing) throws IOException {

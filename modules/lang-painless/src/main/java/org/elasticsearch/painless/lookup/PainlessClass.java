@@ -20,43 +20,39 @@
 package org.elasticsearch.painless.lookup;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 
 public final class PainlessClass {
 
     public final Map<String, PainlessConstructor> constructors;
-
     public final Map<String, PainlessMethod> staticMethods;
     public final Map<String, PainlessMethod> methods;
-
     public final Map<String, PainlessField> staticFields;
     public final Map<String, PainlessField> fields;
+    public final PainlessMethod functionalInterfaceMethod;
 
+    public final Map<String, PainlessMethod> runtimeMethods;
     public final Map<String, MethodHandle> getterMethodHandles;
     public final Map<String, MethodHandle> setterMethodHandles;
-
-    public final PainlessMethod functionalInterfaceMethod;
 
     PainlessClass(Map<String, PainlessConstructor> constructors,
             Map<String, PainlessMethod> staticMethods, Map<String, PainlessMethod> methods,
             Map<String, PainlessField> staticFields, Map<String, PainlessField> fields,
-            Map<String, MethodHandle> getterMethodHandles, Map<String, MethodHandle> setterMethodHandles,
-            PainlessMethod functionalInterfaceMethod) {
+            PainlessMethod functionalInterfaceMethod,
+            Map<String, PainlessMethod> runtimeMethods,
+            Map<String, MethodHandle> getterMethodHandles, Map<String, MethodHandle> setterMethodHandles) {
 
-        this.constructors = Collections.unmodifiableMap(constructors);
-
-        this.staticMethods = Collections.unmodifiableMap(staticMethods);
-        this.methods = Collections.unmodifiableMap(methods);
-
-        this.staticFields = Collections.unmodifiableMap(staticFields);
-        this.fields = Collections.unmodifiableMap(fields);
-
-        this.getterMethodHandles = Collections.unmodifiableMap(getterMethodHandles);
-        this.setterMethodHandles = Collections.unmodifiableMap(setterMethodHandles);
-
+        this.constructors = Map.copyOf(constructors);
+        this.staticMethods = Map.copyOf(staticMethods);
+        this.methods = Map.copyOf(methods);
+        this.staticFields = Map.copyOf(staticFields);
+        this.fields = Map.copyOf(fields);
         this.functionalInterfaceMethod = functionalInterfaceMethod;
+
+        this.getterMethodHandles = Map.copyOf(getterMethodHandles);
+        this.setterMethodHandles = Map.copyOf(setterMethodHandles);
+        this.runtimeMethods = Map.copyOf(runtimeMethods);
     }
 
     @Override

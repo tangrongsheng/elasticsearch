@@ -18,7 +18,7 @@
  */
 package org.elasticsearch.client.ml.job.config;
 
-import org.elasticsearch.client.ml.job.util.TimeUtil;
+import org.elasticsearch.client.common.TimeUtil;
 import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.unit.TimeValue;
@@ -28,8 +28,10 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -57,7 +59,6 @@ public class Job implements ToXContentObject {
     public static final ParseField DATA_DESCRIPTION = new ParseField("data_description");
     public static final ParseField DESCRIPTION = new ParseField("description");
     public static final ParseField FINISHED_TIME = new ParseField("finished_time");
-    public static final ParseField ESTABLISHED_MODEL_MEMORY = new ParseField("established_model_memory");
     public static final ParseField MODEL_PLOT_CONFIG = new ParseField("model_plot_config");
     public static final ParseField RENORMALIZATION_WINDOW_DAYS = new ParseField("renormalization_window_days");
     public static final ParseField BACKGROUND_PERSIST_INTERVAL = new ParseField("background_persist_interval");
@@ -66,6 +67,7 @@ public class Job implements ToXContentObject {
     public static final ParseField MODEL_SNAPSHOT_ID = new ParseField("model_snapshot_id");
     public static final ParseField RESULTS_INDEX_NAME = new ParseField("results_index_name");
     public static final ParseField DELETING = new ParseField("deleting");
+    public static final ParseField ALLOW_LAZY_OPEN = new ParseField("allow_lazy_open");
 
     public static final ObjectParser<Builder, Void> PARSER = new ObjectParser<>("job_details", true, Builder::new);
 
@@ -82,7 +84,6 @@ public class Job implements ToXContentObject {
             (p) -> TimeUtil.parseTimeField(p, FINISHED_TIME.getPreferredName()),
             FINISHED_TIME,
             ValueType.VALUE);
-        PARSER.declareLong(Builder::setEstablishedModelMemory, ESTABLISHED_MODEL_MEMORY);
         PARSER.declareObject(Builder::setAnalysisConfig, AnalysisConfig.PARSER, ANALYSIS_CONFIG);
         PARSER.declareObject(Builder::setAnalysisLimits, AnalysisLimits.PARSER, ANALYSIS_LIMITS);
         PARSER.declareObject(Builder::setDataDescription, DataDescription.PARSER, DATA_DESCRIPTION);
@@ -92,10 +93,11 @@ public class Job implements ToXContentObject {
             TimeValue.parseTimeValue(val, BACKGROUND_PERSIST_INTERVAL.getPreferredName())), BACKGROUND_PERSIST_INTERVAL);
         PARSER.declareLong(Builder::setResultsRetentionDays, RESULTS_RETENTION_DAYS);
         PARSER.declareLong(Builder::setModelSnapshotRetentionDays, MODEL_SNAPSHOT_RETENTION_DAYS);
-        PARSER.declareField(Builder::setCustomSettings, (p, c) -> p.map(), CUSTOM_SETTINGS, ValueType.OBJECT);
+        PARSER.declareField(Builder::setCustomSettings, (p, c) -> p.mapOrdered(), CUSTOM_SETTINGS, ValueType.OBJECT);
         PARSER.declareStringOrNull(Builder::setModelSnapshotId, MODEL_SNAPSHOT_ID);
         PARSER.declareString(Builder::setResultsIndexName, RESULTS_INDEX_NAME);
         PARSER.declareBoolean(Builder::setDeleting, DELETING);
+        PARSER.declareBoolean(Builder::setAllowLazyOpen, ALLOW_LAZY_OPEN);
     }
 
     private final String jobId;
@@ -105,7 +107,6 @@ public class Job implements ToXContentObject {
     private final String description;
     private final Date createTime;
     private final Date finishedTime;
-    private final Long establishedModelMemory;
     private final AnalysisConfig analysisConfig;
     private final AnalysisLimits analysisLimits;
     private final DataDescription dataDescription;
@@ -118,13 +119,14 @@ public class Job implements ToXContentObject {
     private final String modelSnapshotId;
     private final String resultsIndexName;
     private final Boolean deleting;
+    private final Boolean allowLazyOpen;
 
     private Job(String jobId, String jobType, List<String> groups, String description,
-                Date createTime, Date finishedTime, Long establishedModelMemory,
+                Date createTime, Date finishedTime,
                 AnalysisConfig analysisConfig, AnalysisLimits analysisLimits, DataDescription dataDescription,
                 ModelPlotConfig modelPlotConfig, Long renormalizationWindowDays, TimeValue backgroundPersistInterval,
                 Long modelSnapshotRetentionDays, Long resultsRetentionDays, Map<String, Object> customSettings,
-                String modelSnapshotId, String resultsIndexName, Boolean deleting) {
+                String modelSnapshotId, String resultsIndexName, Boolean deleting, Boolean allowLazyOpen) {
 
         this.jobId = jobId;
         this.jobType = jobType;
@@ -132,7 +134,6 @@ public class Job implements ToXContentObject {
         this.description = description;
         this.createTime = createTime;
         this.finishedTime = finishedTime;
-        this.establishedModelMemory = establishedModelMemory;
         this.analysisConfig = analysisConfig;
         this.analysisLimits = analysisLimits;
         this.dataDescription = dataDescription;
@@ -145,6 +146,7 @@ public class Job implements ToXContentObject {
         this.modelSnapshotId = modelSnapshotId;
         this.resultsIndexName = resultsIndexName;
         this.deleting = deleting;
+        this.allowLazyOpen = allowLazyOpen;
     }
 
     /**
@@ -200,16 +202,6 @@ public class Job implements ToXContentObject {
      */
     public Date getFinishedTime() {
         return finishedTime;
-    }
-
-    /**
-     * The established model memory of the job, or <code>null</code> if model
-     * memory has not reached equilibrium yet.
-     *
-     * @return The established model memory of the job
-     */
-    public Long getEstablishedModelMemory() {
-        return establishedModelMemory;
     }
 
     /**
@@ -283,6 +275,10 @@ public class Job implements ToXContentObject {
         return deleting;
     }
 
+    public Boolean getAllowLazyOpen() {
+        return allowLazyOpen;
+    }
+
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
@@ -303,9 +299,6 @@ public class Job implements ToXContentObject {
         if (finishedTime != null) {
             builder.timeField(FINISHED_TIME.getPreferredName(), FINISHED_TIME.getPreferredName() + humanReadableSuffix,
                 finishedTime.getTime());
-        }
-        if (establishedModelMemory != null) {
-            builder.field(ESTABLISHED_MODEL_MEMORY.getPreferredName(), establishedModelMemory);
         }
         builder.field(ANALYSIS_CONFIG.getPreferredName(), analysisConfig, params);
         if (analysisLimits != null) {
@@ -341,6 +334,9 @@ public class Job implements ToXContentObject {
         if (deleting != null) {
             builder.field(DELETING.getPreferredName(), deleting);
         }
+        if (allowLazyOpen != null) {
+            builder.field(ALLOW_LAZY_OPEN.getPreferredName(), allowLazyOpen);
+        }
         builder.endObject();
         return builder;
     }
@@ -362,7 +358,6 @@ public class Job implements ToXContentObject {
             && Objects.equals(this.description, that.description)
             && Objects.equals(this.createTime, that.createTime)
             && Objects.equals(this.finishedTime, that.finishedTime)
-            && Objects.equals(this.establishedModelMemory, that.establishedModelMemory)
             && Objects.equals(this.analysisConfig, that.analysisConfig)
             && Objects.equals(this.analysisLimits, that.analysisLimits)
             && Objects.equals(this.dataDescription, that.dataDescription)
@@ -374,15 +369,16 @@ public class Job implements ToXContentObject {
             && Objects.equals(this.customSettings, that.customSettings)
             && Objects.equals(this.modelSnapshotId, that.modelSnapshotId)
             && Objects.equals(this.resultsIndexName, that.resultsIndexName)
-            && Objects.equals(this.deleting, that.deleting);
+            && Objects.equals(this.deleting, that.deleting)
+            && Objects.equals(this.allowLazyOpen, that.allowLazyOpen);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(jobId, jobType, groups, description, createTime, finishedTime, establishedModelMemory,
+        return Objects.hash(jobId, jobType, groups, description, createTime, finishedTime,
             analysisConfig, analysisLimits, dataDescription, modelPlotConfig, renormalizationWindowDays,
             backgroundPersistInterval, modelSnapshotRetentionDays, resultsRetentionDays, customSettings,
-            modelSnapshotId, resultsIndexName, deleting);
+            modelSnapshotId, resultsIndexName, deleting, allowLazyOpen);
     }
 
     @Override
@@ -405,7 +401,6 @@ public class Job implements ToXContentObject {
         private DataDescription dataDescription;
         private Date createTime;
         private Date finishedTime;
-        private Long establishedModelMemory;
         private ModelPlotConfig modelPlotConfig;
         private Long renormalizationWindowDays;
         private TimeValue backgroundPersistInterval;
@@ -415,6 +410,7 @@ public class Job implements ToXContentObject {
         private String modelSnapshotId;
         private String resultsIndexName;
         private Boolean deleting;
+        private Boolean allowLazyOpen;
 
         private Builder() {
         }
@@ -426,23 +422,23 @@ public class Job implements ToXContentObject {
         public Builder(Job job) {
             this.id = job.getId();
             this.jobType = job.getJobType();
-            this.groups = job.getGroups();
+            this.groups = new ArrayList<>(job.getGroups());
             this.description = job.getDescription();
             this.analysisConfig = job.getAnalysisConfig();
             this.analysisLimits = job.getAnalysisLimits();
             this.dataDescription = job.getDataDescription();
             this.createTime = job.getCreateTime();
             this.finishedTime = job.getFinishedTime();
-            this.establishedModelMemory = job.getEstablishedModelMemory();
             this.modelPlotConfig = job.getModelPlotConfig();
             this.renormalizationWindowDays = job.getRenormalizationWindowDays();
             this.backgroundPersistInterval = job.getBackgroundPersistInterval();
             this.modelSnapshotRetentionDays = job.getModelSnapshotRetentionDays();
             this.resultsRetentionDays = job.getResultsRetentionDays();
-            this.customSettings = job.getCustomSettings();
+            this.customSettings = job.getCustomSettings() == null ? null : new LinkedHashMap<>(job.getCustomSettings());
             this.modelSnapshotId = job.getModelSnapshotId();
             this.resultsIndexName = job.getResultsIndexNameNoPrefix();
             this.deleting = job.getDeleting();
+            this.allowLazyOpen = job.getAllowLazyOpen();
         }
 
         public Builder setId(String id) {
@@ -494,11 +490,6 @@ public class Job implements ToXContentObject {
             return this;
         }
 
-        public Builder setEstablishedModelMemory(Long establishedModelMemory) {
-            this.establishedModelMemory = establishedModelMemory;
-            return this;
-        }
-
         public Builder setDataDescription(DataDescription.Builder description) {
             dataDescription = Objects.requireNonNull(description, DATA_DESCRIPTION.getPreferredName()).build();
             return this;
@@ -544,6 +535,11 @@ public class Job implements ToXContentObject {
             return this;
         }
 
+        Builder setAllowLazyOpen(Boolean allowLazyOpen) {
+            this.allowLazyOpen = allowLazyOpen;
+            return this;
+        }
+
         /**
          * Builds a job.
          *
@@ -553,10 +549,10 @@ public class Job implements ToXContentObject {
             Objects.requireNonNull(id,  "[" + ID.getPreferredName() + "] must not be null");
             Objects.requireNonNull(jobType,  "[" + JOB_TYPE.getPreferredName() + "] must not be null");
             return new Job(
-                id, jobType, groups, description, createTime, finishedTime, establishedModelMemory,
+                id, jobType, groups, description, createTime, finishedTime,
                 analysisConfig, analysisLimits, dataDescription, modelPlotConfig, renormalizationWindowDays,
                 backgroundPersistInterval, modelSnapshotRetentionDays, resultsRetentionDays, customSettings,
-                modelSnapshotId, resultsIndexName, deleting);
+                modelSnapshotId, resultsIndexName, deleting, allowLazyOpen);
         }
     }
 }

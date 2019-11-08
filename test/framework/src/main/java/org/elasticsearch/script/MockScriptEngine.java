@@ -21,12 +21,12 @@ package org.elasticsearch.script;
 
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Scorable;
+import org.elasticsearch.index.query.IntervalFilterScript;
 import org.elasticsearch.index.similarity.ScriptedSimilarity.Doc;
 import org.elasticsearch.index.similarity.ScriptedSimilarity.Field;
 import org.elasticsearch.index.similarity.ScriptedSimilarity.Query;
 import org.elasticsearch.index.similarity.ScriptedSimilarity.Term;
 import org.elasticsearch.search.aggregations.pipeline.MovingFunctionScript;
-import org.elasticsearch.search.aggregations.pipeline.MovingFunctions;
 import org.elasticsearch.search.lookup.LeafSearchLookup;
 import org.elasticsearch.search.lookup.SearchLookup;
 
@@ -270,7 +270,13 @@ public class MockScriptEngine implements ScriptEngine {
             SimilarityWeightScript.Factory factory = mockCompiled::createSimilarityWeightScript;
             return context.factoryClazz.cast(factory);
         } else if (context.instanceClazz.equals(MovingFunctionScript.class)) {
-            MovingFunctionScript.Factory factory = mockCompiled::createMovingFunctionScript;
+            MovingFunctionScript.Factory factory = () -> new MovingFunctionScript() {
+                @Override
+                public double execute(Map<String, Object> params1, double[] values) {
+                    params1.put("_values", values);
+                    return (double) script.apply(params1);
+                }
+            };
             return context.factoryClazz.cast(factory);
         } else if (context.instanceClazz.equals(ScoreScript.class)) {
             ScoreScript.Factory factory = new MockScoreScript(script);
@@ -286,6 +292,9 @@ public class MockScriptEngine implements ScriptEngine {
             return context.factoryClazz.cast(factory);
         } else if (context.instanceClazz.equals(ScriptedMetricAggContexts.ReduceScript.class)) {
             ScriptedMetricAggContexts.ReduceScript.Factory factory = mockCompiled::createMetricAggReduceScript;
+            return context.factoryClazz.cast(factory);
+        } else if (context.instanceClazz.equals(IntervalFilterScript.class)) {
+            IntervalFilterScript.Factory factory = mockCompiled::createIntervalFilterScript;
             return context.factoryClazz.cast(factory);
         }
         ContextCompiler compiler = contexts.get(context);
@@ -331,10 +340,6 @@ public class MockScriptEngine implements ScriptEngine {
             return new MockSimilarityWeightScript(script != null ? script : ctx -> 42d);
         }
 
-        public MovingFunctionScript createMovingFunctionScript() {
-            return new MockMovingFunctionScript();
-        }
-
         public ScriptedMetricAggContexts.InitScript createMetricAggInitScript(Map<String, Object> params, Map<String, Object> state) {
             return new MockMetricAggInitScript(params, state, script != null ? script : ctx -> 42d);
         }
@@ -352,6 +357,15 @@ public class MockScriptEngine implements ScriptEngine {
 
         public ScriptedMetricAggContexts.ReduceScript createMetricAggReduceScript(Map<String, Object> params, List<Object> states) {
             return new MockMetricAggReduceScript(params, states, script != null ? script : ctx -> 42d);
+        }
+
+        public IntervalFilterScript createIntervalFilterScript() {
+            return new IntervalFilterScript() {
+                @Override
+                public boolean execute(Interval interval) {
+                    return false;
+                }
+            };
         }
     }
 
@@ -531,13 +545,6 @@ public class MockScriptEngine implements ScriptEngine {
         return new Script(ScriptType.INLINE, "mock", script, emptyMap());
     }
 
-    public class MockMovingFunctionScript extends MovingFunctionScript {
-        @Override
-        public double execute(Map<String, Object> params, double[] values) {
-            return MovingFunctions.unweightedAvg(values);
-        }
-    }
-
     public class MockScoreScript implements ScoreScript.Factory {
 
         private final Function<Map<String, Object>, Object> script;
@@ -559,7 +566,7 @@ public class MockScriptEngine implements ScriptEngine {
                     Scorable[] scorerHolder = new Scorable[1];
                     return new ScoreScript(params, lookup, ctx) {
                         @Override
-                        public double execute() {
+                        public double execute(ExplanationHolder explanation) {
                             Map<String, Object> vars = new HashMap<>(getParams());
                             vars.put("doc", getDoc());
                             if (scorerHolder[0] != null) {

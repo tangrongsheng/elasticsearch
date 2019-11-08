@@ -21,6 +21,8 @@ package org.elasticsearch.painless;
 
 import org.elasticsearch.painless.api.Augmentation;
 import org.elasticsearch.painless.lookup.PainlessLookup;
+import org.elasticsearch.painless.symbol.FunctionTable;
+import org.elasticsearch.script.JodaCompatibleZonedDateTime;
 import org.elasticsearch.script.ScriptException;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -31,6 +33,7 @@ import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.time.ZonedDateTime;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.Collections;
@@ -98,13 +101,18 @@ public final class WriterConstants {
     public static final Method STRING_TO_CHAR = getAsmMethod(char.class, "StringTochar", String.class);
     public static final Method CHAR_TO_STRING = getAsmMethod(String.class, "charToString", char.class);
 
+    public static final Type FUNCTION_TABLE_TYPE = Type.getType(FunctionTable.class);
+
+    // TODO: remove this when the transition from Joda to Java datetimes is completed
+    public static final Method JCZDT_TO_ZONEDDATETIME =
+            getAsmMethod(ZonedDateTime.class, "JCZDTToZonedDateTime", JodaCompatibleZonedDateTime.class);
 
     public static final Type METHOD_HANDLE_TYPE = Type.getType(MethodHandle.class);
 
     public static final Type AUGMENTATION_TYPE = Type.getType(Augmentation.class);
 
     /**
-     * A Method instance for {@linkplain Pattern#compile}. This isn't available from PainlessLookup because we intentionally don't add it
+     * A Method instance for {@linkplain Pattern}. This isn't available from PainlessLookup because we intentionally don't add it
      * there so that the script can't create regexes without this syntax. Essentially, our static regex syntax has a monopoly on building
      * regexes because it can do it statically. This is both faster and prevents the script from doing something super slow like building a
      * regex per time it is run.
@@ -120,24 +128,50 @@ public final class WriterConstants {
             DEF_BOOTSTRAP_METHOD.getDescriptor(), false);
     public static final Type DEF_BOOTSTRAP_DELEGATE_TYPE = Type.getType(DefBootstrap.class);
     public static final Method DEF_BOOTSTRAP_DELEGATE_METHOD = getAsmMethod(CallSite.class, "bootstrap", PainlessLookup.class,
-            Map.class, MethodHandles.Lookup.class, String.class, MethodType.class, int.class, int.class, Object[].class);
+            FunctionTable.class, MethodHandles.Lookup.class, String.class, MethodType.class, int.class, int.class, Object[].class);
 
     public static final Type DEF_UTIL_TYPE = Type.getType(Def.class);
-    public static final Method DEF_TO_BOOLEAN         = getAsmMethod(boolean.class, "DefToboolean"       , Object.class);
-    public static final Method DEF_TO_BYTE_IMPLICIT   = getAsmMethod(byte.class   , "DefTobyteImplicit"  , Object.class);
-    public static final Method DEF_TO_SHORT_IMPLICIT  = getAsmMethod(short.class  , "DefToshortImplicit" , Object.class);
-    public static final Method DEF_TO_CHAR_IMPLICIT   = getAsmMethod(char.class   , "DefTocharImplicit"  , Object.class);
-    public static final Method DEF_TO_INT_IMPLICIT    = getAsmMethod(int.class    , "DefTointImplicit"   , Object.class);
-    public static final Method DEF_TO_LONG_IMPLICIT   = getAsmMethod(long.class   , "DefTolongImplicit"  , Object.class);
-    public static final Method DEF_TO_FLOAT_IMPLICIT  = getAsmMethod(float.class  , "DefTofloatImplicit" , Object.class);
-    public static final Method DEF_TO_DOUBLE_IMPLICIT = getAsmMethod(double.class , "DefTodoubleImplicit", Object.class);
-    public static final Method DEF_TO_BYTE_EXPLICIT   = getAsmMethod(byte.class   , "DefTobyteExplicit"  , Object.class);
-    public static final Method DEF_TO_SHORT_EXPLICIT  = getAsmMethod(short.class  , "DefToshortExplicit" , Object.class);
-    public static final Method DEF_TO_CHAR_EXPLICIT   = getAsmMethod(char.class   , "DefTocharExplicit"  , Object.class);
-    public static final Method DEF_TO_INT_EXPLICIT    = getAsmMethod(int.class    , "DefTointExplicit"   , Object.class);
-    public static final Method DEF_TO_LONG_EXPLICIT   = getAsmMethod(long.class   , "DefTolongExplicit"  , Object.class);
-    public static final Method DEF_TO_FLOAT_EXPLICIT  = getAsmMethod(float.class  , "DefTofloatExplicit" , Object.class);
-    public static final Method DEF_TO_DOUBLE_EXPLICIT = getAsmMethod(double.class , "DefTodoubleExplicit", Object.class);
+
+    public static final Method DEF_TO_P_BOOLEAN = getAsmMethod(boolean.class, "defToboolean", Object.class);
+
+    public static final Method DEF_TO_P_BYTE_IMPLICIT   = getAsmMethod(byte.class   , "defTobyteImplicit"   , Object.class);
+    public static final Method DEF_TO_P_SHORT_IMPLICIT  = getAsmMethod(short.class  , "defToshortImplicit"  , Object.class);
+    public static final Method DEF_TO_P_CHAR_IMPLICIT   = getAsmMethod(char.class   , "defTocharImplicit"   , Object.class);
+    public static final Method DEF_TO_P_INT_IMPLICIT    = getAsmMethod(int.class    , "defTointImplicit"    , Object.class);
+    public static final Method DEF_TO_P_LONG_IMPLICIT   = getAsmMethod(long.class   , "defTolongImplicit"   , Object.class);
+    public static final Method DEF_TO_P_FLOAT_IMPLICIT  = getAsmMethod(float.class  , "defTofloatImplicit"  , Object.class);
+    public static final Method DEF_TO_P_DOUBLE_IMPLICIT = getAsmMethod(double.class , "defTodoubleImplicit" , Object.class);
+    public static final Method DEF_TO_P_BYTE_EXPLICIT   = getAsmMethod(byte.class   , "defTobyteExplicit"   , Object.class);
+    public static final Method DEF_TO_P_SHORT_EXPLICIT  = getAsmMethod(short.class  , "defToshortExplicit"  , Object.class);
+    public static final Method DEF_TO_P_CHAR_EXPLICIT   = getAsmMethod(char.class   , "defTocharExplicit"   , Object.class);
+    public static final Method DEF_TO_P_INT_EXPLICIT    = getAsmMethod(int.class    , "defTointExplicit"    , Object.class);
+    public static final Method DEF_TO_P_LONG_EXPLICIT   = getAsmMethod(long.class   , "defTolongExplicit"   , Object.class);
+    public static final Method DEF_TO_P_FLOAT_EXPLICIT  = getAsmMethod(float.class  , "defTofloatExplicit"  , Object.class);
+    public static final Method DEF_TO_P_DOUBLE_EXPLICIT = getAsmMethod(double.class , "defTodoubleExplicit" , Object.class);
+
+    public static final Method DEF_TO_B_BOOLEAN = getAsmMethod(Boolean.class, "defToBoolean", Object.class);
+
+    public static final Method DEF_TO_B_BYTE_IMPLICIT      = getAsmMethod(Byte.class      , "defToByteImplicit"      , Object.class);
+    public static final Method DEF_TO_B_SHORT_IMPLICIT     = getAsmMethod(Short.class     , "defToShortImplicit"     , Object.class);
+    public static final Method DEF_TO_B_CHARACTER_IMPLICIT = getAsmMethod(Character.class , "defToCharacterImplicit" , Object.class);
+    public static final Method DEF_TO_B_INTEGER_IMPLICIT   = getAsmMethod(Integer.class   , "defToIntegerImplicit"   , Object.class);
+    public static final Method DEF_TO_B_LONG_IMPLICIT      = getAsmMethod(Long.class      , "defToLongImplicit"      , Object.class);
+    public static final Method DEF_TO_B_FLOAT_IMPLICIT     = getAsmMethod(Float.class     , "defToFloatImplicit"     , Object.class);
+    public static final Method DEF_TO_B_DOUBLE_IMPLICIT    = getAsmMethod(Double.class    , "defToDoubleImplicit"    , Object.class);
+    public static final Method DEF_TO_B_BYTE_EXPLICIT      = getAsmMethod(Byte.class      , "defToByteExplicit"      , Object.class);
+    public static final Method DEF_TO_B_SHORT_EXPLICIT     = getAsmMethod(Short.class     , "defToShortExplicit"     , Object.class);
+    public static final Method DEF_TO_B_CHARACTER_EXPLICIT = getAsmMethod(Character.class , "defToCharacterExplicit" , Object.class);
+    public static final Method DEF_TO_B_INTEGER_EXPLICIT   = getAsmMethod(Integer.class   , "defToIntegerExplicit"   , Object.class);
+    public static final Method DEF_TO_B_LONG_EXPLICIT      = getAsmMethod(Long.class      , "defToLongExplicit"      , Object.class);
+    public static final Method DEF_TO_B_FLOAT_EXPLICIT     = getAsmMethod(Float.class     , "defToFloatExplicit"     , Object.class);
+    public static final Method DEF_TO_B_DOUBLE_EXPLICIT    = getAsmMethod(Double.class    , "defToDoubleExplicit"    , Object.class);
+
+    public static final Method DEF_TO_STRING_IMPLICIT = getAsmMethod(String.class, "defToStringImplicit", Object.class);
+    public static final Method DEF_TO_STRING_EXPLICIT = getAsmMethod(String.class, "defToStringExplicit", Object.class);
+
+    // TODO: remove this when the transition from Joda to Java datetimes is completed
+    public static final Method DEF_TO_ZONEDDATETIME = getAsmMethod(ZonedDateTime.class, "defToZonedDateTime", Object.class);
+
     public static final Type DEF_ARRAY_LENGTH_METHOD_TYPE = Type.getMethodType(Type.INT_TYPE, Type.getType(Object.class));
 
     /** invokedynamic bootstrap for lambda expression/method references */

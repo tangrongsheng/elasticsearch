@@ -19,6 +19,10 @@
 
 package org.elasticsearch.painless.lookup;
 
+import org.elasticsearch.bootstrap.BootstrapInfo;
+import org.elasticsearch.painless.Def;
+import org.elasticsearch.painless.MethodWriter;
+import org.elasticsearch.painless.WriterConstants;
 import org.elasticsearch.painless.spi.Whitelist;
 import org.elasticsearch.painless.spi.WhitelistClass;
 import org.elasticsearch.painless.spi.WhitelistClassBinding;
@@ -26,6 +30,10 @@ import org.elasticsearch.painless.spi.WhitelistConstructor;
 import org.elasticsearch.painless.spi.WhitelistField;
 import org.elasticsearch.painless.spi.WhitelistInstanceBinding;
 import org.elasticsearch.painless.spi.WhitelistMethod;
+import org.elasticsearch.painless.spi.annotation.NoImportAnnotation;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.commons.GeneratorAdapter;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -34,6 +42,13 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.security.AccessController;
+import java.security.CodeSource;
+import java.security.PrivilegedAction;
+import java.security.SecureClassLoader;
+import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -41,6 +56,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_BYTE_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_CHARACTER_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_DOUBLE_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_FLOAT_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_INTEGER_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_LONG_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_TO_B_SHORT_IMPLICIT;
+import static org.elasticsearch.painless.WriterConstants.DEF_UTIL_TYPE;
+import static org.elasticsearch.painless.WriterConstants.OBJECT_TYPE;
 import static org.elasticsearch.painless.lookup.PainlessLookupUtility.DEF_CLASS_NAME;
 import static org.elasticsearch.painless.lookup.PainlessLookupUtility.buildPainlessConstructorKey;
 import static org.elasticsearch.painless.lookup.PainlessLookupUtility.buildPainlessFieldKey;
@@ -51,15 +75,41 @@ import static org.elasticsearch.painless.lookup.PainlessLookupUtility.typesToCan
 
 public final class PainlessLookupBuilder {
 
+    private static final class BridgeLoader extends SecureClassLoader {
+        BridgeLoader(ClassLoader parent) {
+            super(parent);
+        }
+
+        @Override
+        public Class<?> findClass(String name) throws ClassNotFoundException {
+            return Def.class.getName().equals(name) ? Def.class : super.findClass(name);
+        }
+
+        Class<?> defineBridge(String name, byte[] bytes) {
+            return defineClass(name, bytes, 0, bytes.length, CODESOURCE);
+        }
+    }
+
+    private static final CodeSource CODESOURCE;
+
     private static final Map<PainlessConstructor    , PainlessConstructor>     painlessConstructorCache     = new HashMap<>();
     private static final Map<PainlessMethod         , PainlessMethod>          painlessMethodCache          = new HashMap<>();
     private static final Map<PainlessField          , PainlessField>           painlessFieldCache           = new HashMap<>();
     private static final Map<PainlessClassBinding   , PainlessClassBinding>    painlessClassBindingCache    = new HashMap<>();
     private static final Map<PainlessInstanceBinding, PainlessInstanceBinding> painlessInstanceBindingCache = new HashMap<>();
+    private static final Map<PainlessMethod         , PainlessMethod>          painlessBridgeCache          = new HashMap<>();
 
     private static final Pattern CLASS_NAME_PATTERN  = Pattern.compile("^[_a-zA-Z][._a-zA-Z0-9]*$");
     private static final Pattern METHOD_NAME_PATTERN = Pattern.compile("^[_a-zA-Z][_a-zA-Z0-9]*$");
     private static final Pattern FIELD_NAME_PATTERN  = Pattern.compile("^[_a-zA-Z][_a-zA-Z0-9]*$");
+
+    static {
+        try {
+            CODESOURCE = new CodeSource(new URL("file:" + BootstrapInfo.UNTRUSTED_CODEBASE), (Certificate[])null);
+        } catch (MalformedURLException mue) {
+            throw new RuntimeException(mue);
+        }
+    }
 
     public static PainlessLookup buildFromWhitelists(List<Whitelist> whitelists) {
         PainlessLookupBuilder painlessLookupBuilder = new PainlessLookupBuilder();
@@ -70,7 +120,8 @@ public final class PainlessLookupBuilder {
                 for (WhitelistClass whitelistClass : whitelist.whitelistClasses) {
                     origin = whitelistClass.origin;
                     painlessLookupBuilder.addPainlessClass(
-                            whitelist.classLoader, whitelistClass.javaClassName, whitelistClass.noImport == false);
+                            whitelist.classLoader, whitelistClass.javaClassName,
+                            whitelistClass.painlessAnnotations.containsKey(NoImportAnnotation.class) == false);
                 }
             }
 
@@ -212,7 +263,7 @@ public final class PainlessLookupBuilder {
         Class<?> existingClass = javaClassNamesToClasses.get(clazz.getName());
 
         if (existingClass == null) {
-            javaClassNamesToClasses.put(clazz.getName(), clazz);
+            javaClassNamesToClasses.put(clazz.getName().intern(), clazz);
         } else if (existingClass != clazz) {
             throw new IllegalArgumentException("class [" + canonicalClassName + "] " +
                     "cannot represent multiple java classes with the same name from different class loaders");
@@ -230,7 +281,7 @@ public final class PainlessLookupBuilder {
         if (existingPainlessClassBuilder == null) {
             PainlessClassBuilder painlessClassBuilder = new PainlessClassBuilder();
 
-            canonicalClassNamesToClasses.put(canonicalClassName, clazz);
+            canonicalClassNamesToClasses.put(canonicalClassName.intern(), clazz);
             classesToPainlessClassBuilders.put(clazz, painlessClassBuilder);
         }
 
@@ -251,7 +302,7 @@ public final class PainlessLookupBuilder {
                                 "inconsistent no_import parameter found for class [" + canonicalClassName + "]");
                     }
 
-                    canonicalClassNamesToClasses.put(importedCanonicalClassName, clazz);
+                    canonicalClassNamesToClasses.put(importedCanonicalClassName.intern(), clazz);
                 }
             } else if (importedClass != clazz) {
                 throw new IllegalArgumentException("imported class [" + importedCanonicalClassName + "] cannot represent multiple " +
@@ -343,7 +394,7 @@ public final class PainlessLookupBuilder {
 
         if (existingPainlessConstructor == null) {
             newPainlessConstructor = painlessConstructorCache.computeIfAbsent(newPainlessConstructor, key -> key);
-            painlessClassBuilder.constructors.put(painlessConstructorKey, newPainlessConstructor);
+            painlessClassBuilder.constructors.put(painlessConstructorKey.intern(), newPainlessConstructor);
         } else if (newPainlessConstructor.equals(existingPainlessConstructor) == false){
             throw new IllegalArgumentException("cannot add constructors with the same arity but are not equivalent for constructors " +
                     "[[" + targetCanonicalClassName + "], " + typesToCanonicalTypeNames(typeParameters) + "] and " +
@@ -517,9 +568,9 @@ public final class PainlessLookupBuilder {
             newPainlessMethod = painlessMethodCache.computeIfAbsent(newPainlessMethod, key -> key);
 
             if (isStatic) {
-                painlessClassBuilder.staticMethods.put(painlessMethodKey, newPainlessMethod);
+                painlessClassBuilder.staticMethods.put(painlessMethodKey.intern(), newPainlessMethod);
             } else {
-                painlessClassBuilder.methods.put(painlessMethodKey, newPainlessMethod);
+                painlessClassBuilder.methods.put(painlessMethodKey.intern(), newPainlessMethod);
             }
         } else if (newPainlessMethod.equals(existingPainlessMethod) == false) {
             throw new IllegalArgumentException("cannot add methods with the same name and arity but are not equivalent for methods " +
@@ -620,7 +671,7 @@ public final class PainlessLookupBuilder {
 
             if (existingPainlessField == null) {
                 newPainlessField = painlessFieldCache.computeIfAbsent(newPainlessField, key -> key);
-                painlessClassBuilder.staticFields.put(painlessFieldKey, newPainlessField);
+                painlessClassBuilder.staticFields.put(painlessFieldKey.intern(), newPainlessField);
             } else if (newPainlessField.equals(existingPainlessField) == false) {
                 throw new IllegalArgumentException("cannot add fields with the same name but are not equivalent for fields " +
                         "[[" + targetCanonicalClassName + "], [" + fieldName + "], [" +
@@ -644,7 +695,7 @@ public final class PainlessLookupBuilder {
 
             if (existingPainlessField == null) {
                 newPainlessField = painlessFieldCache.computeIfAbsent(newPainlessField, key -> key);
-                painlessClassBuilder.fields.put(painlessFieldKey, newPainlessField);
+                painlessClassBuilder.fields.put(painlessFieldKey.intern(), newPainlessField);
             } else if (newPainlessField.equals(existingPainlessField) == false) {
                 throw new IllegalArgumentException("cannot add fields with the same name but are not equivalent for fields " +
                         "[[" + targetCanonicalClassName + "], [" + fieldName + "], [" +
@@ -717,7 +768,7 @@ public final class PainlessLookupBuilder {
         Class<?> existingTargetClass = javaClassNamesToClasses.get(targetClass.getName());
 
         if (existingTargetClass == null) {
-            javaClassNamesToClasses.put(targetClass.getName(), targetClass);
+            javaClassNamesToClasses.put(targetClass.getName().intern(), targetClass);
         } else if (existingTargetClass != targetClass) {
             throw new IllegalArgumentException("class [" + targetCanonicalClassName + "] " +
                     "cannot represent multiple java classes with the same name from different class loaders");
@@ -794,7 +845,7 @@ public final class PainlessLookupBuilder {
 
         if (existingImportedPainlessMethod == null) {
             newImportedPainlessMethod = painlessMethodCache.computeIfAbsent(newImportedPainlessMethod, key -> key);
-            painlessMethodKeysToImportedPainlessMethods.put(painlessMethodKey, newImportedPainlessMethod);
+            painlessMethodKeysToImportedPainlessMethods.put(painlessMethodKey.intern(), newImportedPainlessMethod);
         } else if (newImportedPainlessMethod.equals(existingImportedPainlessMethod) == false) {
             throw new IllegalArgumentException("cannot add imported methods with the same name and arity " +
                     "but do not have equivalent methods " +
@@ -862,7 +913,7 @@ public final class PainlessLookupBuilder {
         Class<?> existingTargetClass = javaClassNamesToClasses.get(targetClass.getName());
 
         if (existingTargetClass == null) {
-            javaClassNamesToClasses.put(targetClass.getName(), targetClass);
+            javaClassNamesToClasses.put(targetClass.getName().intern(), targetClass);
         } else if (existingTargetClass != targetClass) {
             throw new IllegalArgumentException("class [" + targetCanonicalClassName + "] " +
                     "cannot represent multiple java classes with the same name from different class loaders");
@@ -989,7 +1040,7 @@ public final class PainlessLookupBuilder {
 
         if (existingPainlessClassBinding == null) {
             newPainlessClassBinding = painlessClassBindingCache.computeIfAbsent(newPainlessClassBinding, key -> key);
-            painlessMethodKeysToPainlessClassBindings.put(painlessMethodKey, newPainlessClassBinding);
+            painlessMethodKeysToPainlessClassBindings.put(painlessMethodKey.intern(), newPainlessClassBinding);
         } else if (newPainlessClassBinding.equals(existingPainlessClassBinding) == false) {
             throw new IllegalArgumentException("cannot add class bindings with the same name and arity " +
                     "but do not have equivalent methods " +
@@ -1053,7 +1104,7 @@ public final class PainlessLookupBuilder {
         Class<?> existingTargetClass = javaClassNamesToClasses.get(targetClass.getName());
 
         if (existingTargetClass == null) {
-            javaClassNamesToClasses.put(targetClass.getName(), targetClass);
+            javaClassNamesToClasses.put(targetClass.getName().intern(), targetClass);
         } else if (existingTargetClass != targetClass) {
             throw new IllegalArgumentException("class [" + targetCanonicalClassName + "] " +
                     "cannot represent multiple java classes with the same name from different class loaders");
@@ -1119,7 +1170,7 @@ public final class PainlessLookupBuilder {
 
         if (existingPainlessInstanceBinding == null) {
             newPainlessInstanceBinding = painlessInstanceBindingCache.computeIfAbsent(newPainlessInstanceBinding, key -> key);
-            painlessMethodKeysToPainlessInstanceBindings.put(painlessMethodKey, newPainlessInstanceBinding);
+            painlessMethodKeysToPainlessInstanceBindings.put(painlessMethodKey.intern(), newPainlessInstanceBinding);
         } else if (newPainlessInstanceBinding.equals(existingPainlessInstanceBinding) == false) {
             throw new IllegalArgumentException("cannot add instances bindings with the same name and arity " +
                     "but do not have equivalent methods " +
@@ -1136,8 +1187,9 @@ public final class PainlessLookupBuilder {
 
     public PainlessLookup build() {
         copyPainlessClassMembers();
-        cacheRuntimeHandles();
         setFunctionalInterfaceMethods();
+        generateRuntimeMethods();
+        cacheRuntimeHandles();
 
         Map<Class<?>, PainlessClass> classesToPainlessClasses = new HashMap<>(classesToPainlessClassBuilders.size());
 
@@ -1217,7 +1269,7 @@ public final class PainlessLookupBuilder {
 
             if (existingPainlessMethod == null || existingPainlessMethod.targetClass != newPainlessMethod.targetClass &&
                     existingPainlessMethod.targetClass.isAssignableFrom(newPainlessMethod.targetClass)) {
-                targetPainlessClassBuilder.methods.put(painlessMethodKey, newPainlessMethod);
+                targetPainlessClassBuilder.methods.put(painlessMethodKey.intern(), newPainlessMethod);
             }
         }
 
@@ -1229,40 +1281,8 @@ public final class PainlessLookupBuilder {
             if (existingPainlessField == null ||
                     existingPainlessField.javaField.getDeclaringClass() != newPainlessField.javaField.getDeclaringClass() &&
                     existingPainlessField.javaField.getDeclaringClass().isAssignableFrom(newPainlessField.javaField.getDeclaringClass())) {
-                targetPainlessClassBuilder.fields.put(painlessFieldKey, newPainlessField);
+                targetPainlessClassBuilder.fields.put(painlessFieldKey.intern(), newPainlessField);
             }
-        }
-    }
-
-    private void cacheRuntimeHandles() {
-        for (PainlessClassBuilder painlessClassBuilder : classesToPainlessClassBuilders.values()) {
-            cacheRuntimeHandles(painlessClassBuilder);
-        }
-    }
-
-    private void cacheRuntimeHandles(PainlessClassBuilder painlessClassBuilder) {
-        for (PainlessMethod painlessMethod : painlessClassBuilder.methods.values()) {
-            String methodName = painlessMethod.javaMethod.getName();
-            int typeParametersSize = painlessMethod.typeParameters.size();
-
-            if (typeParametersSize == 0 && methodName.startsWith("get") && methodName.length() > 3 &&
-                    Character.isUpperCase(methodName.charAt(3))) {
-                painlessClassBuilder.getterMethodHandles.putIfAbsent(
-                        Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4), painlessMethod.methodHandle);
-            } else if (typeParametersSize == 0 && methodName.startsWith("is") && methodName.length() > 2 &&
-                    Character.isUpperCase(methodName.charAt(2))) {
-                painlessClassBuilder.getterMethodHandles.putIfAbsent(
-                        Character.toLowerCase(methodName.charAt(2)) + methodName.substring(3), painlessMethod.methodHandle);
-            } else if (typeParametersSize == 1 && methodName.startsWith("set") && methodName.length() > 3 &&
-                    Character.isUpperCase(methodName.charAt(3))) {
-                painlessClassBuilder.setterMethodHandles.putIfAbsent(
-                        Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4), painlessMethod.methodHandle);
-            }
-        }
-
-        for (PainlessField painlessField : painlessClassBuilder.fields.values()) {
-            painlessClassBuilder.getterMethodHandles.put(painlessField.javaField.getName(), painlessField.getterMethodHandle);
-            painlessClassBuilder.setterMethodHandles.put(painlessField.javaField.getName(), painlessField.setterMethodHandle);
         }
     }
 
@@ -1294,6 +1314,180 @@ public final class PainlessLookupBuilder {
                 String painlessMethodKey = buildPainlessMethodKey(javaMethod.getName(), javaMethod.getParameterCount());
                 painlessClassBuilder.functionalInterfaceMethod = painlessClassBuilder.methods.get(painlessMethodKey);
             }
+        }
+    }
+
+    /**
+     * Creates a {@link Map} of PainlessMethodKeys to {@link PainlessMethod}s per {@link PainlessClass} stored as
+     * {@link PainlessClass#runtimeMethods} identical to {@link PainlessClass#methods} with the exception of generated
+     * bridge methods. A generated bridge method is created for each whitelisted method that has at least one parameter
+     * with a boxed type to cast from other numeric primitive/boxed types in a symmetric was not handled by
+     * {@link MethodHandle#asType(MethodType)}. As an example {@link MethodHandle#asType(MethodType)} legally casts
+     * from {@link Integer} to long but not from int to {@link Long}. Generated bridge methods cover the latter case.
+     * A generated bridge method replaces the method its a bridge to in the {@link PainlessClass#runtimeMethods}
+     * {@link Map}. The {@link PainlessClass#runtimeMethods} {@link Map} is used exclusively to look up methods at
+     * run-time resulting from calls with a def type value target.
+     */
+    private void generateRuntimeMethods() {
+        for (PainlessClassBuilder painlessClassBuilder : classesToPainlessClassBuilders.values()) {
+            painlessClassBuilder.runtimeMethods.putAll(painlessClassBuilder.methods);
+
+            for (PainlessMethod painlessMethod : painlessClassBuilder.runtimeMethods.values()) {
+                for (Class<?> typeParameter : painlessMethod.typeParameters) {
+                    if (
+                            typeParameter == Byte.class      ||
+                            typeParameter == Short.class     ||
+                            typeParameter == Character.class ||
+                            typeParameter == Integer.class   ||
+                            typeParameter == Long.class      ||
+                            typeParameter == Float.class     ||
+                            typeParameter == Double.class
+                    ) {
+                        generateBridgeMethod(painlessClassBuilder, painlessMethod);
+                    }
+                }
+            }
+        }
+    }
+
+    private void generateBridgeMethod(PainlessClassBuilder painlessClassBuilder, PainlessMethod painlessMethod) {
+        String painlessMethodKey = buildPainlessMethodKey(painlessMethod.javaMethod.getName(), painlessMethod.typeParameters.size());
+        PainlessMethod bridgePainlessMethod = painlessBridgeCache.get(painlessMethod);
+
+        if (bridgePainlessMethod == null) {
+            Method javaMethod = painlessMethod.javaMethod;
+            boolean isStatic = Modifier.isStatic(painlessMethod.javaMethod.getModifiers());
+
+            int bridgeClassFrames = ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS;
+            int bridgeClassAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER | Opcodes.ACC_FINAL;
+            String bridgeClassName =
+                    "org/elasticsearch/painless/Bridge$" + javaMethod.getDeclaringClass().getSimpleName() + "$" + javaMethod.getName();
+            ClassWriter bridgeClassWriter = new ClassWriter(bridgeClassFrames);
+            bridgeClassWriter.visit(
+                    WriterConstants.CLASS_VERSION, bridgeClassAccess, bridgeClassName, null, OBJECT_TYPE.getInternalName(), null);
+
+            org.objectweb.asm.commons.Method bridgeConstructorType =
+                    new org.objectweb.asm.commons.Method("<init>", MethodType.methodType(void.class).toMethodDescriptorString());
+            GeneratorAdapter bridgeConstructorWriter =
+                    new GeneratorAdapter(Opcodes.ASM5, bridgeConstructorType, bridgeClassWriter.visitMethod(
+                            Opcodes.ACC_PRIVATE, bridgeConstructorType.getName(), bridgeConstructorType.getDescriptor(), null, null));
+            bridgeConstructorWriter.visitCode();
+            bridgeConstructorWriter.loadThis();
+            bridgeConstructorWriter.invokeConstructor(OBJECT_TYPE, bridgeConstructorType);
+            bridgeConstructorWriter.returnValue();
+            bridgeConstructorWriter.endMethod();
+
+            int bridgeTypeParameterOffset = isStatic ? 0 : 1;
+            List<Class<?>> bridgeTypeParameters = new ArrayList<>(javaMethod.getParameterTypes().length + bridgeTypeParameterOffset);
+
+            if (isStatic == false) {
+                bridgeTypeParameters.add(javaMethod.getDeclaringClass());
+            }
+
+            for (Class<?> typeParameter : javaMethod.getParameterTypes()) {
+                if (
+                        typeParameter == Byte.class      ||
+                        typeParameter == Short.class     ||
+                        typeParameter == Character.class ||
+                        typeParameter == Integer.class   ||
+                        typeParameter == Long.class      ||
+                        typeParameter == Float.class     ||
+                        typeParameter == Double.class
+                ) {
+                    bridgeTypeParameters.add(Object.class);
+                } else {
+                    bridgeTypeParameters.add(typeParameter);
+                }
+            }
+
+            MethodType bridgeMethodType = MethodType.methodType(painlessMethod.returnType, bridgeTypeParameters);
+            MethodWriter bridgeMethodWriter =
+                    new MethodWriter(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                            new org.objectweb.asm.commons.Method(
+                                    painlessMethod.javaMethod.getName(), bridgeMethodType.toMethodDescriptorString()),
+                            bridgeClassWriter, null, null);
+            bridgeMethodWriter.visitCode();
+
+            if (isStatic == false) {
+                bridgeMethodWriter.loadArg(0);
+            }
+
+            for (int typeParameterCount = 0; typeParameterCount < javaMethod.getParameterTypes().length; ++typeParameterCount) {
+                bridgeMethodWriter.loadArg(typeParameterCount + bridgeTypeParameterOffset);
+                Class<?> typeParameter = javaMethod.getParameterTypes()[typeParameterCount];
+
+                if      (typeParameter == Byte.class)      bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_BYTE_IMPLICIT);
+                else if (typeParameter == Short.class)     bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_SHORT_IMPLICIT);
+                else if (typeParameter == Character.class) bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_CHARACTER_IMPLICIT);
+                else if (typeParameter == Integer.class)   bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_INTEGER_IMPLICIT);
+                else if (typeParameter == Long.class)      bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_LONG_IMPLICIT);
+                else if (typeParameter == Float.class)     bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_FLOAT_IMPLICIT);
+                else if (typeParameter == Double.class)    bridgeMethodWriter.invokeStatic(DEF_UTIL_TYPE, DEF_TO_B_DOUBLE_IMPLICIT);
+            }
+
+            bridgeMethodWriter.invokeMethodCall(painlessMethod);
+            bridgeMethodWriter.returnValue();
+            bridgeMethodWriter.endMethod();
+
+            bridgeClassWriter.visitEnd();
+
+            try {
+                BridgeLoader bridgeLoader = AccessController.doPrivileged(new PrivilegedAction<BridgeLoader>() {
+                    @Override
+                    public BridgeLoader run() {
+                        return new BridgeLoader(javaMethod.getDeclaringClass().getClassLoader());
+                    }
+                });
+
+                Class<?> bridgeClass = bridgeLoader.defineBridge(bridgeClassName.replace('/', '.'), bridgeClassWriter.toByteArray());
+                Method bridgeMethod = bridgeClass.getMethod(
+                        painlessMethod.javaMethod.getName(), bridgeTypeParameters.toArray(new Class<?>[0]));
+                MethodHandle bridgeHandle = MethodHandles.publicLookup().in(bridgeClass).unreflect(bridgeClass.getMethods()[0]);
+                bridgePainlessMethod = new PainlessMethod(bridgeMethod, bridgeClass,
+                        painlessMethod.returnType, bridgeTypeParameters, bridgeHandle, bridgeMethodType);
+                painlessClassBuilder.runtimeMethods.put(painlessMethodKey.intern(), bridgePainlessMethod);
+                painlessBridgeCache.put(painlessMethod, bridgePainlessMethod);
+            } catch (Exception exception) {
+                throw new IllegalStateException(
+                        "internal error occurred attempting to generate a bridge method [" + bridgeClassName + "]", exception);
+            }
+        } else {
+            painlessClassBuilder.runtimeMethods.put(painlessMethodKey.intern(), bridgePainlessMethod);
+        }
+    }
+
+    private void cacheRuntimeHandles() {
+        for (PainlessClassBuilder painlessClassBuilder : classesToPainlessClassBuilders.values()) {
+            cacheRuntimeHandles(painlessClassBuilder);
+        }
+    }
+
+    private void cacheRuntimeHandles(PainlessClassBuilder painlessClassBuilder) {
+        for (Map.Entry<String, PainlessMethod> painlessMethodEntry : painlessClassBuilder.methods.entrySet()) {
+            String methodKey = painlessMethodEntry.getKey();
+            PainlessMethod painlessMethod = painlessMethodEntry.getValue();
+            PainlessMethod bridgePainlessMethod = painlessClassBuilder.runtimeMethods.get(methodKey);
+            String methodName = painlessMethod.javaMethod.getName();
+            int typeParametersSize = painlessMethod.typeParameters.size();
+
+            if (typeParametersSize == 0 && methodName.startsWith("get") && methodName.length() > 3 &&
+                    Character.isUpperCase(methodName.charAt(3))) {
+                painlessClassBuilder.getterMethodHandles.putIfAbsent(
+                        Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4), bridgePainlessMethod.methodHandle);
+            } else if (typeParametersSize == 0 && methodName.startsWith("is") && methodName.length() > 2 &&
+                    Character.isUpperCase(methodName.charAt(2))) {
+                painlessClassBuilder.getterMethodHandles.putIfAbsent(
+                        Character.toLowerCase(methodName.charAt(2)) + methodName.substring(3), bridgePainlessMethod.methodHandle);
+            } else if (typeParametersSize == 1 && methodName.startsWith("set") && methodName.length() > 3 &&
+                    Character.isUpperCase(methodName.charAt(3))) {
+                painlessClassBuilder.setterMethodHandles.putIfAbsent(
+                        Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4), bridgePainlessMethod.methodHandle);
+            }
+        }
+
+        for (PainlessField painlessField : painlessClassBuilder.fields.values()) {
+            painlessClassBuilder.getterMethodHandles.put(painlessField.javaField.getName().intern(), painlessField.getterMethodHandle);
+            painlessClassBuilder.setterMethodHandles.put(painlessField.javaField.getName().intern(), painlessField.setterMethodHandle);
         }
     }
 }

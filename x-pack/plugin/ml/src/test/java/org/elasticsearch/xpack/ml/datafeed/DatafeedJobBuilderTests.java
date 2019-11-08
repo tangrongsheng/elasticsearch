@@ -13,14 +13,19 @@ import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.mock.orig.Mockito;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.xpack.core.ml.action.util.QueryPage;
+import org.elasticsearch.transport.RemoteClusterService;
+import org.elasticsearch.xpack.core.action.util.QueryPage;
 import org.elasticsearch.xpack.core.ml.datafeed.DatafeedConfig;
 import org.elasticsearch.xpack.core.ml.job.config.DataDescription;
 import org.elasticsearch.xpack.core.ml.job.config.Job;
+import org.elasticsearch.xpack.core.ml.job.messages.Messages;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.DataCounts;
 import org.elasticsearch.xpack.core.ml.job.results.Bucket;
+import org.elasticsearch.xpack.ml.datafeed.persistence.DatafeedConfigProvider;
+import org.elasticsearch.xpack.ml.job.persistence.JobConfigProvider;
+import org.elasticsearch.xpack.ml.job.persistence.JobResultsPersister;
 import org.elasticsearch.xpack.ml.job.persistence.JobResultsProvider;
-import org.elasticsearch.xpack.ml.notifications.Auditor;
+import org.elasticsearch.xpack.ml.notifications.AnomalyDetectionAuditor;
 import org.junit.Before;
 
 import java.util.Collections;
@@ -32,6 +37,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -40,24 +46,28 @@ import static org.mockito.Mockito.when;
 public class DatafeedJobBuilderTests extends ESTestCase {
 
     private Client client;
-    private Auditor auditor;
-    private JobResultsProvider jobResultsProvider;
+    private AnomalyDetectionAuditor auditor;
     private Consumer<Exception> taskHandler;
+    private JobResultsProvider jobResultsProvider;
+    private JobConfigProvider jobConfigProvider;
+    private DatafeedConfigProvider datafeedConfigProvider;
+    private JobResultsPersister jobResultsPersister;
 
     private DatafeedJobBuilder datafeedJobBuilder;
 
     @Before
+    @SuppressWarnings("unchecked")
     public void init() {
         client = mock(Client.class);
         ThreadPool threadPool = mock(ThreadPool.class);
         when(client.threadPool()).thenReturn(threadPool);
         when(threadPool.getThreadContext()).thenReturn(new ThreadContext(Settings.EMPTY));
         when(client.settings()).thenReturn(Settings.EMPTY);
-        auditor = mock(Auditor.class);
-        jobResultsProvider = mock(JobResultsProvider.class);
+        auditor = mock(AnomalyDetectionAuditor.class);
         taskHandler = mock(Consumer.class);
-        datafeedJobBuilder = new DatafeedJobBuilder(client, jobResultsProvider, auditor, System::currentTimeMillis);
+        jobResultsPersister = mock(JobResultsPersister.class);
 
+        jobResultsProvider = mock(JobResultsProvider.class);
         Mockito.doAnswer(invocationOnMock -> {
             String jobId = (String) invocationOnMock.getArguments()[0];
             @SuppressWarnings("unchecked")
@@ -72,6 +82,21 @@ public class DatafeedJobBuilderTests extends ESTestCase {
             consumer.accept(new ResourceNotFoundException("dummy"));
             return null;
         }).when(jobResultsProvider).bucketsViaInternalClient(any(), any(), any(), any());
+
+        jobConfigProvider = mock(JobConfigProvider.class);
+        datafeedConfigProvider = mock(DatafeedConfigProvider.class);
+        datafeedJobBuilder =
+            new DatafeedJobBuilder(
+                client,
+                xContentRegistry(),
+                auditor,
+                System::currentTimeMillis,
+                jobConfigProvider,
+                jobResultsProvider,
+                datafeedConfigProvider,
+                jobResultsPersister,
+                Settings.EMPTY,
+                "test_node");
     }
 
     public void testBuild_GivenScrollDatafeedAndNewJob() throws Exception {
@@ -79,7 +104,8 @@ public class DatafeedJobBuilderTests extends ESTestCase {
         dataDescription.setTimeField("time");
         Job.Builder jobBuilder = DatafeedManagerTests.createDatafeedJob();
         jobBuilder.setDataDescription(dataDescription);
-        DatafeedConfig datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", "foo").build();
+        jobBuilder.setCreateTime(new Date());
+        DatafeedConfig.Builder datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", jobBuilder.getId());
 
         AtomicBoolean wasHandlerCalled = new AtomicBoolean(false);
         ActionListener<DatafeedJob> datafeedJobHandler = ActionListener.wrap(
@@ -91,7 +117,10 @@ public class DatafeedJobBuilderTests extends ESTestCase {
                 }, e -> fail()
         );
 
-        datafeedJobBuilder.build(jobBuilder.build(new Date()), datafeed, datafeedJobHandler);
+        givenJob(jobBuilder);
+        givenDatafeed(datafeed);
+
+        datafeedJobBuilder.build("datafeed1", datafeedJobHandler);
 
         assertBusy(() -> wasHandlerCalled.get());
     }
@@ -101,7 +130,8 @@ public class DatafeedJobBuilderTests extends ESTestCase {
         dataDescription.setTimeField("time");
         Job.Builder jobBuilder = DatafeedManagerTests.createDatafeedJob();
         jobBuilder.setDataDescription(dataDescription);
-        DatafeedConfig datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", "foo").build();
+        jobBuilder.setCreateTime(new Date());
+        DatafeedConfig.Builder datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", jobBuilder.getId());
 
         givenLatestTimes(7_200_000L, 3_600_000L);
 
@@ -115,7 +145,10 @@ public class DatafeedJobBuilderTests extends ESTestCase {
                 }, e -> fail()
         );
 
-        datafeedJobBuilder.build(jobBuilder.build(new Date()), datafeed, datafeedJobHandler);
+        givenJob(jobBuilder);
+        givenDatafeed(datafeed);
+
+        datafeedJobBuilder.build("datafeed1", datafeedJobHandler);
 
         assertBusy(() -> wasHandlerCalled.get());
     }
@@ -125,7 +158,8 @@ public class DatafeedJobBuilderTests extends ESTestCase {
         dataDescription.setTimeField("time");
         Job.Builder jobBuilder = DatafeedManagerTests.createDatafeedJob();
         jobBuilder.setDataDescription(dataDescription);
-        DatafeedConfig datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", "foo").build();
+        jobBuilder.setCreateTime(new Date());
+        DatafeedConfig.Builder datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", jobBuilder.getId());
 
         givenLatestTimes(3_800_000L, 3_600_000L);
 
@@ -139,7 +173,10 @@ public class DatafeedJobBuilderTests extends ESTestCase {
                 }, e -> fail()
         );
 
-        datafeedJobBuilder.build(jobBuilder.build(new Date()), datafeed, datafeedJobHandler);
+        givenJob(jobBuilder);
+        givenDatafeed(datafeed);
+
+        datafeedJobBuilder.build("datafeed1", datafeedJobHandler);
 
         assertBusy(() -> wasHandlerCalled.get());
     }
@@ -149,7 +186,8 @@ public class DatafeedJobBuilderTests extends ESTestCase {
         dataDescription.setTimeField("time");
         Job.Builder jobBuilder = DatafeedManagerTests.createDatafeedJob();
         jobBuilder.setDataDescription(dataDescription);
-        DatafeedConfig datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", "foo").build();
+        jobBuilder.setCreateTime(new Date());
+        DatafeedConfig.Builder datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", jobBuilder.getId());
 
         Exception error = new RuntimeException("error");
         doAnswer(invocationOnMock -> {
@@ -159,9 +197,71 @@ public class DatafeedJobBuilderTests extends ESTestCase {
             return null;
         }).when(jobResultsProvider).bucketsViaInternalClient(any(), any(), any(), any());
 
-        datafeedJobBuilder.build(jobBuilder.build(new Date()), datafeed, ActionListener.wrap(datafeedJob -> fail(), taskHandler));
+
+        givenJob(jobBuilder);
+        givenDatafeed(datafeed);
+
+        datafeedJobBuilder.build("datafeed1", ActionListener.wrap(datafeedJob -> fail(), taskHandler));
 
         verify(taskHandler).accept(error);
+    }
+
+    public void testBuildGivenRemoteIndicesButNoRemoteSearching() throws Exception {
+        Settings settings = Settings.builder().put(RemoteClusterService.ENABLE_REMOTE_CLUSTERS.getKey(), false).build();
+        datafeedJobBuilder =
+            new DatafeedJobBuilder(
+                client,
+                xContentRegistry(),
+                auditor,
+                System::currentTimeMillis,
+                jobConfigProvider,
+                jobResultsProvider,
+                datafeedConfigProvider,
+                jobResultsPersister,
+                settings,
+                "test_node");
+        DataDescription.Builder dataDescription = new DataDescription.Builder();
+        dataDescription.setTimeField("time");
+        Job.Builder jobBuilder = DatafeedManagerTests.createDatafeedJob();
+        jobBuilder.setDataDescription(dataDescription);
+        jobBuilder.setCreateTime(new Date());
+        DatafeedConfig.Builder datafeed = DatafeedManagerTests.createDatafeedConfig("datafeed1", jobBuilder.getId());
+        datafeed.setIndices(Collections.singletonList("remotecluster:index-*"));
+
+        AtomicBoolean wasHandlerCalled = new AtomicBoolean(false);
+        ActionListener<DatafeedJob> datafeedJobHandler = ActionListener.wrap(
+            datafeedJob -> fail("datafeed builder did not fail when remote index was given and remote clusters were not enabled"),
+            e -> {
+                assertThat(e.getMessage(), equalTo(Messages.getMessage(Messages.DATAFEED_NEEDS_REMOTE_CLUSTER_SEARCH,
+                    "datafeed1",
+                    "[remotecluster:index-*]",
+                    "test_node")));
+                wasHandlerCalled.compareAndSet(false, true);
+            }
+        );
+
+        givenJob(jobBuilder);
+        givenDatafeed(datafeed);
+        datafeedJobBuilder.build("datafeed1", datafeedJobHandler);
+        assertBusy(() -> wasHandlerCalled.get());
+    }
+
+    private void givenJob(Job.Builder job) {
+        Mockito.doAnswer(invocationOnMock -> {
+            @SuppressWarnings("unchecked")
+            ActionListener<Job.Builder> handler = (ActionListener<Job.Builder>) invocationOnMock.getArguments()[1];
+            handler.onResponse(job);
+            return null;
+        }).when(jobConfigProvider).getJob(eq(job.getId()), any());
+    }
+
+    private void givenDatafeed(DatafeedConfig.Builder datafeed) {
+        Mockito.doAnswer(invocationOnMock -> {
+            @SuppressWarnings("unchecked")
+            ActionListener<DatafeedConfig.Builder> handler = (ActionListener<DatafeedConfig.Builder>) invocationOnMock.getArguments()[1];
+            handler.onResponse(datafeed);
+            return null;
+        }).when(datafeedConfigProvider).getDatafeedConfig(eq(datafeed.getId()), any());
     }
 
     private void givenLatestTimes(long latestRecordTimestamp, long latestBucketTimestamp) {

@@ -34,9 +34,11 @@ import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SegmentCommitInfo;
 import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.index.ShuffleForcedMergePolicy;
 import org.apache.lucene.index.StandardDirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.Directory;
@@ -56,7 +58,7 @@ public class RecoverySourcePruneMergePolicyTests extends ESTestCase {
             IndexWriterConfig iwc = newIndexWriterConfig();
             RecoverySourcePruneMergePolicy mp = new RecoverySourcePruneMergePolicy("extra_source", MatchNoDocsQuery::new,
                 newLogMergePolicy());
-            iwc.setMergePolicy(mp);
+            iwc.setMergePolicy(new ShuffleForcedMergePolicy(mp));
             try (IndexWriter writer = new IndexWriter(dir, iwc)) {
                 for (int i = 0; i < 20; i++) {
                     if (i > 0 && randomBoolean()) {
@@ -152,6 +154,41 @@ public class RecoverySourcePruneMergePolicyTests extends ESTestCase {
                         } else {
                             assertEquals(2, document.getFields().size());
                         }
+                    }
+                    assertEquals(DocIdSetIterator.NO_MORE_DOCS, extra_source.nextDoc());
+                }
+            }
+        }
+    }
+
+    public void testPruneNone() throws IOException {
+        try (Directory dir = newDirectory()) {
+            IndexWriterConfig iwc = newIndexWriterConfig();
+            iwc.setMergePolicy(new RecoverySourcePruneMergePolicy("extra_source",
+                () -> new MatchAllDocsQuery(), iwc.getMergePolicy()));
+            try (IndexWriter writer = new IndexWriter(dir, iwc)) {
+                for (int i = 0; i < 20; i++) {
+                    if (i > 0 && randomBoolean()) {
+                        writer.flush();
+                    }
+                    Document doc = new Document();
+                    doc.add(new StoredField("source", "hello world"));
+                    doc.add(new StoredField("extra_source", "hello world"));
+                    doc.add(new NumericDocValuesField("extra_source", 1));
+                    writer.addDocument(doc);
+                }
+                writer.forceMerge(1);
+                writer.commit();
+                try (DirectoryReader reader = DirectoryReader.open(writer)) {
+                    assertEquals(1, reader.leaves().size());
+                    NumericDocValues extra_source = reader.leaves().get(0).reader().getNumericDocValues("extra_source");
+                    assertNotNull(extra_source);
+                    for (int i = 0; i < reader.maxDoc(); i++) {
+                        Document document = reader.document(i);
+                        Set<String> collect = document.getFields().stream().map(IndexableField::name).collect(Collectors.toSet());
+                        assertTrue(collect.contains("source"));
+                        assertTrue(collect.contains("extra_source"));
+                        assertEquals(i, extra_source.nextDoc());
                     }
                     assertEquals(DocIdSetIterator.NO_MORE_DOCS, extra_source.nextDoc());
                 }

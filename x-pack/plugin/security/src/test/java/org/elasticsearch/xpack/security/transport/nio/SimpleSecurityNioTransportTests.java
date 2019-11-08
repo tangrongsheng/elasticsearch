@@ -12,31 +12,28 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.MockPageCacheRecycler;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
-import org.elasticsearch.test.transport.MockTransportService;
-import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.ConnectionProfile;
 import org.elasticsearch.transport.TcpChannel;
-import org.elasticsearch.transport.TcpTransport;
 import org.elasticsearch.transport.Transport;
+import org.elasticsearch.transport.nio.NioGroupFactory;
 import org.elasticsearch.xpack.security.transport.AbstractSimpleSecurityTransportTestCase;
 
 import java.util.Collections;
 
 public class SimpleSecurityNioTransportTests extends AbstractSimpleSecurityTransportTestCase {
 
-    public MockTransportService nioFromThreadPool(Settings settings, ThreadPool threadPool, final Version version,
-                                                  ClusterSettings clusterSettings, boolean doHandshake) {
+    @Override
+    protected Transport build(Settings settings, final Version version, ClusterSettings clusterSettings, boolean doHandshake) {
         NamedWriteableRegistry namedWriteableRegistry = new NamedWriteableRegistry(Collections.emptyList());
         NetworkService networkService = new NetworkService(Collections.emptyList());
         Settings settings1 = Settings.builder()
                 .put(settings)
                 .put("xpack.security.transport.ssl.enabled", true).build();
-        Transport transport = new SecurityNioTransport(settings1, version, threadPool, networkService, BigArrays.NON_RECYCLING_INSTANCE,
-            new MockPageCacheRecycler(settings), namedWriteableRegistry, new NoneCircuitBreakerService(), null,
-            createSSLService(settings1)) {
+        return new SecurityNioTransport(settings1, version, threadPool, networkService, new MockPageCacheRecycler(settings),
+            namedWriteableRegistry, new NoneCircuitBreakerService(), null, createSSLService(settings1),
+            new NioGroupFactory(settings, logger)) {
 
             @Override
             public void executeHandshake(DiscoveryNode node, TcpChannel channel, ConnectionProfile profile,
@@ -48,22 +45,5 @@ public class SimpleSecurityNioTransportTests extends AbstractSimpleSecurityTrans
                 }
             }
         };
-        MockTransportService mockTransportService =
-                MockTransportService.createNewService(settings, transport, version, threadPool, clusterSettings,
-                        Collections.emptySet());
-        mockTransportService.start();
-        return mockTransportService;
-    }
-
-    @Override
-    protected MockTransportService build(Settings settings, Version version, ClusterSettings clusterSettings, boolean doHandshake) {
-        if (TcpTransport.PORT.exists(settings) == false) {
-            settings = Settings.builder().put(settings)
-                .put(TcpTransport.PORT.getKey(), "0")
-                .build();
-        }
-        MockTransportService transportService = nioFromThreadPool(settings, threadPool, version, clusterSettings, doHandshake);
-        transportService.start();
-        return transportService;
     }
 }

@@ -6,7 +6,7 @@
 package org.elasticsearch.xpack.sql.expression;
 
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.xpack.sql.tree.Location;
+import org.elasticsearch.xpack.sql.tree.Source;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -25,7 +25,7 @@ import static org.hamcrest.Matchers.is;
 public class AttributeMapTests extends ESTestCase {
 
     private static Attribute a(String name) {
-        return new UnresolvedAttribute(Location.EMPTY, name);
+        return new UnresolvedAttribute(Source.EMPTY, name);
     }
 
     private static AttributeMap<String> threeMap() {
@@ -55,7 +55,7 @@ public class AttributeMapTests extends ESTestCase {
 
         Attribute one = m.keySet().iterator().next();
         assertThat(m.containsKey(one), is(true));
-        assertThat(m.containsKey(a("one")), is(false));
+        assertThat(m.containsKey(a("one")), is(true));
         assertThat(m.containsValue("one"), is(true));
         assertThat(m.containsValue("on"), is(false));
         assertThat(m.attributeNames(), contains("one", "two", "three"));
@@ -74,24 +74,24 @@ public class AttributeMapTests extends ESTestCase {
         assertThat(m.isEmpty(), is(false));
 
         assertThat(m.containsKey(one), is(true));
-        assertThat(m.containsKey(a("one")), is(false));
+        assertThat(m.containsKey(a("one")), is(true));
         assertThat(m.containsValue("one"), is(true));
         assertThat(m.containsValue("on"), is(false));
     }
 
-    public void testSubstract() {
+    public void testSubtract() {
         AttributeMap<String> m = threeMap();
         AttributeMap<String> mo = new AttributeMap<>(m.keySet().iterator().next(), "one");
         AttributeMap<String> empty = new AttributeMap<>();
 
-        assertThat(m.substract(empty), is(m));
-        assertThat(m.substract(m), is(empty));
-        assertThat(mo.substract(m), is(empty));
+        assertThat(m.subtract(empty), is(m));
+        assertThat(m.subtract(m), is(empty));
+        assertThat(mo.subtract(m), is(empty));
 
-        AttributeMap<String> substract = m.substract(mo);
+        AttributeMap<String> subtract = m.subtract(mo);
 
-        assertThat(substract.size(), is(2));
-        assertThat(substract.attributeNames(), contains("two", "three"));
+        assertThat(subtract.size(), is(2));
+        assertThat(subtract.attributeNames(), contains("two", "three"));
     }
 
     public void testIntersect() {

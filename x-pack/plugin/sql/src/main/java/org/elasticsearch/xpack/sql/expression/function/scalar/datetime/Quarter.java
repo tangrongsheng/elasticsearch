@@ -7,53 +7,46 @@
 package org.elasticsearch.xpack.sql.expression.function.scalar.datetime;
 
 import org.elasticsearch.xpack.sql.expression.Expression;
-import org.elasticsearch.xpack.sql.expression.FieldAttribute;
 import org.elasticsearch.xpack.sql.expression.gen.processor.Processor;
+import org.elasticsearch.xpack.sql.expression.gen.script.ParamsBuilder;
 import org.elasticsearch.xpack.sql.expression.gen.script.ScriptTemplate;
-import org.elasticsearch.xpack.sql.tree.Location;
 import org.elasticsearch.xpack.sql.tree.NodeInfo.NodeCtor2;
+import org.elasticsearch.xpack.sql.tree.Source;
 import org.elasticsearch.xpack.sql.type.DataType;
 
-import java.time.ZonedDateTime;
-import java.util.TimeZone;
+import java.time.ZoneId;
 
-import static org.elasticsearch.xpack.sql.expression.function.scalar.datetime.QuarterProcessor.quarter;
 import static org.elasticsearch.xpack.sql.expression.gen.script.ParamsBuilder.paramsBuilder;
 
 public class Quarter extends BaseDateTimeFunction {
 
-    public Quarter(Location location, Expression field, TimeZone timeZone) {
-        super(location, field, timeZone);
+    public Quarter(Source source, Expression field, ZoneId zoneId) {
+        super(source, field, zoneId);
+    }
+    
+    @Override
+    public ScriptTemplate asScript() {
+        ScriptTemplate script = super.asScript();
+        String template = formatTemplate("{sql}.quarter(" + script.template() + ", {})");
+        
+        ParamsBuilder params = paramsBuilder().script(script.params()).variable(zoneId().getId());
+        
+        return new ScriptTemplate(template, params.build(), dataType());
     }
 
     @Override
-    protected Object doFold(ZonedDateTime dateTime) {
-        return quarter(dateTime);
-    }
-
-    @Override
-    public ScriptTemplate scriptWithField(FieldAttribute field) {
-        return new ScriptTemplate(formatTemplate("{sql}.quarter(doc[{}].value, {})"),
-                paramsBuilder()
-                  .variable(field.name())
-                  .variable(timeZone().getID())
-                  .build(),
-                dataType());
-    }
-
-    @Override
-    protected NodeCtor2<Expression, TimeZone, BaseDateTimeFunction> ctorForInfo() {
+    protected NodeCtor2<Expression, ZoneId, BaseDateTimeFunction> ctorForInfo() {
         return Quarter::new;
     }
 
     @Override
     protected Quarter replaceChild(Expression newChild) {
-        return new Quarter(location(), newChild, timeZone());
+        return new Quarter(source(), newChild, zoneId());
     }
 
     @Override
     protected Processor makeProcessor() {
-        return new QuarterProcessor(timeZone());
+        return new QuarterProcessor(zoneId());
     }
 
     @Override

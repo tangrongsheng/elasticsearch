@@ -26,7 +26,6 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.common.xcontent.XContentType;
 
 import java.io.IOException;
@@ -39,21 +38,19 @@ public class PutPipelineRequest extends AcknowledgedRequest<PutPipelineRequest> 
     private XContentType xContentType;
 
     /**
-     * Create a new pipeline request
-     * @deprecated use {@link #PutPipelineRequest(String, BytesReference, XContentType)} to avoid content type auto-detection
-     */
-    @Deprecated
-    public PutPipelineRequest(String id, BytesReference source) {
-        this(id, source, XContentHelper.xContentType(source));
-    }
-
-    /**
      * Create a new pipeline request with the id and source along with the content type of the source
      */
     public PutPipelineRequest(String id, BytesReference source, XContentType xContentType) {
         this.id = Objects.requireNonNull(id);
         this.source = Objects.requireNonNull(source);
         this.xContentType = Objects.requireNonNull(xContentType);
+    }
+
+    public PutPipelineRequest(StreamInput in) throws IOException {
+        super(in);
+        id = in.readString();
+        source = in.readBytesReference();
+        xContentType = in.readEnum(XContentType.class);
     }
 
     PutPipelineRequest() {
@@ -74,14 +71,6 @@ public class PutPipelineRequest extends AcknowledgedRequest<PutPipelineRequest> 
 
     public XContentType getXContentType() {
         return xContentType;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        id = in.readString();
-        source = in.readBytesReference();
-        xContentType = in.readEnum(XContentType.class);
     }
 
     @Override

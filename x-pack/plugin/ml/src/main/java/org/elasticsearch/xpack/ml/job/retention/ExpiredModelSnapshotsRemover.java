@@ -15,7 +15,6 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.support.ThreadedActionListener;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.client.Client;
-import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.search.SearchHit;
@@ -24,9 +23,11 @@ import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xpack.core.ml.action.DeleteModelSnapshotAction;
 import org.elasticsearch.xpack.core.ml.job.config.Job;
 import org.elasticsearch.xpack.core.ml.job.persistence.AnomalyDetectorsIndex;
+import org.elasticsearch.xpack.core.ml.job.persistence.ElasticsearchMappings;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.ModelSnapshot;
 import org.elasticsearch.xpack.core.ml.job.process.autodetect.state.ModelSnapshotField;
 import org.elasticsearch.xpack.ml.MachineLearning;
+import org.elasticsearch.xpack.ml.utils.VolatileCursorIterator;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -57,8 +58,8 @@ public class ExpiredModelSnapshotsRemover extends AbstractExpiredJobDataRemover 
     private final Client client;
     private final ThreadPool threadPool;
 
-    public ExpiredModelSnapshotsRemover(Client client, ThreadPool threadPool, ClusterService clusterService) {
-        super(clusterService);
+    public ExpiredModelSnapshotsRemover(Client client, ThreadPool threadPool) {
+        super(client);
         this.client = Objects.requireNonNull(client);
         this.threadPool = Objects.requireNonNull(threadPool);
     }
@@ -88,7 +89,7 @@ public class ExpiredModelSnapshotsRemover extends AbstractExpiredJobDataRemover 
                 .mustNot(activeSnapshotFilter)
                 .mustNot(retainFilter);
 
-        searchRequest.source(new SearchSourceBuilder().query(query).size(MODEL_SNAPSHOT_SEARCH_SIZE));
+        searchRequest.source(new SearchSourceBuilder().query(query).size(MODEL_SNAPSHOT_SEARCH_SIZE).sort(ElasticsearchMappings.ES_DOC));
 
         client.execute(SearchAction.INSTANCE, searchRequest, new ThreadedActionListener<>(LOGGER, threadPool,
                 MachineLearning.UTILITY_THREAD_POOL_NAME, expiredSnapshotsListener(job.getId(), listener), false));
@@ -103,7 +104,7 @@ public class ExpiredModelSnapshotsRemover extends AbstractExpiredJobDataRemover 
                     for (SearchHit hit : searchResponse.getHits()) {
                         modelSnapshots.add(ModelSnapshot.fromJson(hit.getSourceRef()));
                     }
-                    deleteModelSnapshots(createVolatileCursorIterator(modelSnapshots), listener);
+                    deleteModelSnapshots(new VolatileCursorIterator<>(modelSnapshots), listener);
                 } catch (Exception e) {
                     onFailure(e);
                 }

@@ -31,9 +31,9 @@ import org.elasticsearch.search.aggregations.metrics.Avg;
 import org.elasticsearch.search.sort.FieldSortBuilder;
 import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.test.ESIntegTestCase;
-import org.joda.time.DateTime;
 
 import java.io.IOException;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -43,6 +43,7 @@ import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 import static org.elasticsearch.search.aggregations.AggregationBuilders.avg;
 import static org.elasticsearch.search.aggregations.AggregationBuilders.dateHistogram;
 import static org.elasticsearch.search.aggregations.AggregationBuilders.histogram;
+import static org.elasticsearch.search.aggregations.AggregationBuilders.max;
 import static org.elasticsearch.search.aggregations.AggregationBuilders.terms;
 import static org.elasticsearch.search.aggregations.PipelineAggregatorBuilders.bucketSort;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertSearchResponse;
@@ -85,16 +86,16 @@ public class BucketSortIT extends ESIntegTestCase {
             for (String term : terms) {
                 int termCount = randomIntBetween(3, 6);
                 for (int i = 0; i < termCount; ++i) {
-                    builders.add(client().prepareIndex(INDEX, "doc")
+                    builders.add(client().prepareIndex(INDEX)
                             .setSource(newDocBuilder(time, term, randomIntBetween(1, 10) * randomDouble())));
                 }
             }
             time += TimeValue.timeValueHours(1).millis();
         }
 
-        builders.add(client().prepareIndex(INDEX_WITH_GAPS, "doc").setSource(newDocBuilder(1, "foo", 1.0, 42.0)));
-        builders.add(client().prepareIndex(INDEX_WITH_GAPS, "doc").setSource(newDocBuilder(2, "foo", null, 42.0)));
-        builders.add(client().prepareIndex(INDEX_WITH_GAPS, "doc").setSource(newDocBuilder(3, "foo", 3.0, 42.0)));
+        builders.add(client().prepareIndex(INDEX_WITH_GAPS).setSource(newDocBuilder(1, "foo", 1.0, 42.0)));
+        builders.add(client().prepareIndex(INDEX_WITH_GAPS).setSource(newDocBuilder(2, "foo", null, 42.0)));
+        builders.add(client().prepareIndex(INDEX_WITH_GAPS).setSource(newDocBuilder(3, "foo", 3.0, 42.0)));
 
         indexRandom(true, builders);
         ensureSearchable();
@@ -131,10 +132,10 @@ public class BucketSortIT extends ESIntegTestCase {
         assertThat(histogram, notNullValue());
         // These become our baseline
         List<? extends Histogram.Bucket> timeBuckets = histogram.getBuckets();
-        DateTime previousKey = (DateTime) timeBuckets.get(0).getKey();
+        ZonedDateTime previousKey = (ZonedDateTime) timeBuckets.get(0).getKey();
         for (Histogram.Bucket timeBucket : timeBuckets) {
-            assertThat(previousKey, lessThanOrEqualTo((DateTime) timeBucket.getKey()));
-            previousKey = (DateTime) timeBucket.getKey();
+            assertThat(previousKey, lessThanOrEqualTo((ZonedDateTime) timeBucket.getKey()));
+            previousKey = (ZonedDateTime) timeBucket.getKey();
         }
 
         // Now let's test using size
@@ -191,6 +192,26 @@ public class BucketSortIT extends ESIntegTestCase {
         }
     }
 
+    public void testSortTermsOnKeyWithSize() {
+        SearchResponse response = client().prepareSearch(INDEX)
+            .setSize(0)
+            .addAggregation(terms("foos").field(TERM_FIELD)
+                .subAggregation(bucketSort("bucketSort", Arrays.asList(new FieldSortBuilder("_key"))).size(3)))
+            .get();
+
+        assertSearchResponse(response);
+
+        Terms terms = response.getAggregations().get("foos");
+        assertThat(terms, notNullValue());
+        List<? extends Terms.Bucket> termsBuckets = terms.getBuckets();
+        assertEquals(3, termsBuckets.size());
+        String previousKey = (String) termsBuckets.get(0).getKey();
+        for (Terms.Bucket termBucket : termsBuckets) {
+            assertThat(previousKey, lessThanOrEqualTo((String) termBucket.getKey()));
+            previousKey = (String) termBucket.getKey();
+        }
+    }
+
     public void testSortTermsOnSubAggregation() {
         SearchResponse response = client().prepareSearch(INDEX)
                 .setSize(0)
@@ -228,6 +249,29 @@ public class BucketSortIT extends ESIntegTestCase {
         List<? extends Terms.Bucket> size2From3TermsBuckets = size2From3Terms.getBuckets();
         for (int i = 0; i < size2From3TermsBuckets.size(); ++i) {
             assertThat(size2From3TermsBuckets.get(i).getKey(), equalTo(termsBuckets.get(i + 3).getKey()));
+        }
+    }
+
+    public void testSortTermsOnSubAggregationPreservesOrderOnEquals() {
+        SearchResponse response = client().prepareSearch(INDEX)
+            .setSize(0)
+            .addAggregation(terms("foos").field(TERM_FIELD)
+                .subAggregation(bucketSort("keyBucketSort", Arrays.asList(new FieldSortBuilder("_key"))))
+                .subAggregation(max("max").field("missingValue").missing(1))
+                .subAggregation(bucketSort("maxBucketSort", Arrays.asList(new FieldSortBuilder("max")))))
+            .get();
+
+        assertSearchResponse(response);
+
+        Terms terms = response.getAggregations().get("foos");
+        assertThat(terms, notNullValue());
+        List<? extends Terms.Bucket> termsBuckets = terms.getBuckets();
+
+        // Since all max values are equal, we expect the order of keyBucketSort to have been preserved
+        String previousKey = (String) termsBuckets.get(0).getKey();
+        for (Terms.Bucket termBucket : termsBuckets) {
+            assertThat(previousKey, lessThanOrEqualTo((String) termBucket.getKey()));
+            previousKey = (String) termBucket.getKey();
         }
     }
 

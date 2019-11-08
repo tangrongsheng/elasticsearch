@@ -18,12 +18,14 @@
  */
 package org.elasticsearch.action.resync;
 
+import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.action.shard.ShardStateAction;
 import org.elasticsearch.cluster.block.ClusterBlocks;
+import org.elasticsearch.cluster.coordination.NoMasterBlockService;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
@@ -34,8 +36,7 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.util.BigArrays;
-import org.elasticsearch.discovery.DiscoverySettings;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.shard.IndexShard;
@@ -49,7 +50,7 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.transport.MockTcpTransport;
+import org.elasticsearch.transport.nio.MockNioTransport;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
@@ -57,6 +58,7 @@ import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.util.Collections.emptyList;
 import static org.elasticsearch.action.support.replication.ClusterStateCreationUtils.state;
@@ -96,11 +98,12 @@ public class TransportResyncReplicationActionTests extends ESTestCase {
 
             setState(clusterService,
                 ClusterState.builder(clusterService.state()).blocks(ClusterBlocks.builder()
-                    .addGlobalBlock(DiscoverySettings.NO_MASTER_BLOCK_ALL)
+                    .addGlobalBlock(NoMasterBlockService.NO_MASTER_BLOCK_ALL)
                     .addIndexBlock(indexName, IndexMetaData.INDEX_WRITE_BLOCK)));
 
-            try (MockTcpTransport transport = new MockTcpTransport(Settings.EMPTY, threadPool, BigArrays.NON_RECYCLING_INSTANCE,
-                new NoneCircuitBreakerService(), new NamedWriteableRegistry(emptyList()), new NetworkService(emptyList()))) {
+            try (MockNioTransport transport = new MockNioTransport(Settings.EMPTY, Version.CURRENT, threadPool,
+                new NetworkService(emptyList()), PageCacheRecycler.NON_RECYCLING_INSTANCE, new NamedWriteableRegistry(emptyList()),
+                new NoneCircuitBreakerService())) {
 
                 final MockTransportService transportService = new MockTransportService(Settings.EMPTY, transport, threadPool,
                     NOOP_TRANSPORT_INTERCEPTOR, x -> clusterService.localNode(), null, Collections.emptySet());
@@ -116,13 +119,17 @@ public class TransportResyncReplicationActionTests extends ESTestCase {
                 final String allocationId = primaryShardRouting.allocationId().getId();
                 final long primaryTerm = indexMetaData.primaryTerm(shardId.id());
 
+                final AtomicInteger acquiredPermits = new AtomicInteger();
                 final IndexShard indexShard = mock(IndexShard.class);
                 when(indexShard.shardId()).thenReturn(shardId);
                 when(indexShard.routingEntry()).thenReturn(primaryShardRouting);
                 when(indexShard.getPendingPrimaryTerm()).thenReturn(primaryTerm);
+                when(indexShard.getOperationPrimaryTerm()).thenReturn(primaryTerm);
+                when(indexShard.getActiveOperationsCount()).then(i -> acquiredPermits.get());
                 doAnswer(invocation -> {
                     ActionListener<Releasable> callback = (ActionListener<Releasable>) invocation.getArguments()[0];
-                    callback.onResponse(() -> logger.trace("released"));
+                    acquiredPermits.incrementAndGet();
+                    callback.onResponse(acquiredPermits::decrementAndGet);
                     return null;
                 }).when(indexShard).acquirePrimaryOperationPermit(any(ActionListener.class), anyString(), anyObject());
                 when(indexShard.getReplicationGroup()).thenReturn(
@@ -148,7 +155,7 @@ public class TransportResyncReplicationActionTests extends ESTestCase {
 
                 final byte[] bytes = "{}".getBytes(Charset.forName("UTF-8"));
                 final ResyncReplicationRequest request = new ResyncReplicationRequest(shardId, 42L, 100,
-                    new Translog.Operation[]{new Translog.Index("type", "id", 0, primaryTerm, 0L, bytes, null, -1)});
+                    new Translog.Operation[]{new Translog.Index("id", 0, primaryTerm, 0L, bytes, null, -1)});
 
                 final PlainActionFuture<ResyncReplicationResponse> listener = new PlainActionFuture<>();
                 action.sync(request, task, allocationId, primaryTerm, listener);

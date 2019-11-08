@@ -41,8 +41,8 @@ import org.elasticsearch.common.xcontent.XContentType;
 public class BulkRequestBuilder extends ActionRequestBuilder<BulkRequest, BulkResponse>
         implements WriteRequestBuilder<BulkRequestBuilder> {
 
-    public BulkRequestBuilder(ElasticsearchClient client, BulkAction action, @Nullable String globalIndex, @Nullable String globalType) {
-        super(client, action, new BulkRequest(globalIndex, globalType));
+    public BulkRequestBuilder(ElasticsearchClient client, BulkAction action, @Nullable String globalIndex) {
+        super(client, action, new BulkRequest(globalIndex));
     }
 
     public BulkRequestBuilder(ElasticsearchClient client, BulkAction action) {
@@ -104,16 +104,16 @@ public class BulkRequestBuilder extends ActionRequestBuilder<BulkRequest, BulkRe
      * Adds a framed data in binary format
      */
     public BulkRequestBuilder add(byte[] data, int from, int length, XContentType xContentType) throws Exception {
-        request.add(data, from, length, null, null, xContentType);
+        request.add(data, from, length, null, xContentType);
         return this;
     }
 
     /**
      * Adds a framed data in binary format
      */
-    public BulkRequestBuilder add(byte[] data, int from, int length, @Nullable String defaultIndex, @Nullable String defaultType,
+    public BulkRequestBuilder add(byte[] data, int from, int length, @Nullable String defaultIndex,
                                   XContentType xContentType) throws Exception {
-        request.add(data, from, length, defaultIndex, defaultType, xContentType);
+        request.add(data, from, length, defaultIndex, xContentType);
         return this;
     }
 
